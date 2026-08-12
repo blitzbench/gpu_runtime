@@ -86,6 +86,14 @@ std::string trim(std::string s) {
     return s.substr(i);
 }
 
+// Skip Microsoft's OpenCLOn12 / D3D12 mapping layer (software renderer).
+bool is_software_compat_platform(const std::string& platform_name,
+                                 const std::string& platform_version) {
+    if (platform_name.find("OpenCLOn12") != std::string::npos) return true;
+    if (platform_version.find("D3D12 Implementation") != std::string::npos) return true;
+    return false;
+}
+
 } // namespace
 
 ProbeResult probe_opencl() {
@@ -125,6 +133,10 @@ ProbeResult probe_opencl() {
 
     for (cl_platform_id p : platforms) {
         std::string pver = platform_info_string(clGetPlatformInfo, p, CL_PLATFORM_VERSION);
+        std::string pname = platform_info_string(clGetPlatformInfo, p, CL_PLATFORM_NAME);
+
+        // skip software renderer before version bookkeeping
+        if (is_software_compat_platform(pname, pver)) continue;
         // CL_PLATFORM_VERSION is shaped "OpenCL <major>.<minor> ...". Extract.
         const std::string prefix = "OpenCL ";
         std::string short_ver;
