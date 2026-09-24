@@ -13,6 +13,7 @@ set(GPGPU_SOURCES
     src/report.cpp
     src/runtime.cpp
     src/search_paths.cpp
+    src/vendor.cpp
     src/version.cpp
     src/backends/common.cpp
     src/backends/cuda.cpp
@@ -57,25 +58,31 @@ endforeach()
 target_include_directories(gpu_runtime
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        # Vendored Khronos headers, sourced via git submodules under
+        # external/<name>/ (README.md > "Third-party headers"). Public because
+        # gpgpu/vendor.hpp exposes their types to consumers.
+        $<BUILD_INTERFACE:${GPGPU_OPENCL_HEADERS_DIR}>
+        $<BUILD_INTERFACE:${GPGPU_VULKAN_HEADERS_DIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        # Vendored third-party headers, sourced via git submodules under
-        # external/<name>/. See README.md > "Third-party headers".
-        ${GPGPU_OPENCL_HEADERS_DIR}
-        ${GPGPU_VULKAN_HEADERS_DIR}
         ${GPGPU_LEVEL_ZERO_DIR}
 )
 
-# OpenCL 3.0 target API level; opt in to deprecated symbols we still query
-# (CL_DEVICE_HOST_UNIFIED_MEMORY is a CL 1.1 attribute deprecated in CL 2.0).
-target_compile_definitions(gpu_runtime PRIVATE
-    CL_TARGET_OPENCL_VERSION=300
-    CL_USE_DEPRECATED_OPENCL_1_1_APIS
-    CL_USE_DEPRECATED_OPENCL_1_2_APIS
-    CL_USE_DEPRECATED_OPENCL_2_0_APIS
-    # We resolve every Vulkan entry point via vkGetInstanceProcAddr, so skip
-    # the function prototypes vulkan_core.h would otherwise emit.
-    VK_NO_PROTOTYPES
+target_compile_definitions(gpu_runtime
+    PUBLIC
+        # OpenCL 3.0 target API level, shared with consumers of gpgpu/vendor.hpp.
+        CL_TARGET_OPENCL_VERSION=300
+        # Every Vulkan entry point is resolved through vkGetInstanceProcAddr /
+        # vkGetDeviceProcAddr (gpgpu/vendor.hpp); without prototypes a direct
+        # vk* call in any consumer fails to compile instead of adding a
+        # link-time dependency on the loader.
+        VK_NO_PROTOTYPES
+    PRIVATE
+        # Deprecated symbols the probe still queries (CL_DEVICE_HOST_UNIFIED_MEMORY
+        # is a CL 1.1 attribute deprecated in CL 2.0).
+        CL_USE_DEPRECATED_OPENCL_1_1_APIS
+        CL_USE_DEPRECATED_OPENCL_1_2_APIS
+        CL_USE_DEPRECATED_OPENCL_2_0_APIS
 )
 
 target_compile_features(gpu_runtime PUBLIC cxx_std_17)

@@ -15,6 +15,18 @@ cmake --build build
 ./build/app/gpu_runtime_query/gpu_runtime_query
 ```
 
+## Calling the vendor runtimes yourself
+
+`include/gpgpu/vendor.hpp` exposes the same run-time binding the probes use, so
+a consumer can drive OpenCL or Vulkan without linking `libOpenCL` / `libvulkan`:
+`gpgpu::vendor::opencl()` and `gpgpu::vendor::vulkan()` dlopen the loader once
+per process and return a table of resolved entry points, or `nullptr` when the
+runtime is absent. Vulkan instance- and device-level tables are filled with
+`load_instance_fns` / `load_device_fns` after the instance and device exist.
+The vendored Khronos headers are on the library's public include path for the
+types, and `VK_NO_PROTOTYPES` is defined publicly so a stray direct `vk*` call
+fails to compile.
+
 ## Third-party headers
 
 Three GPGPU API header sets are pulled in as git submodules under `external/`.
