@@ -13,7 +13,7 @@ endif()
 enable_language(CUDA)
 
 add_library(example_vs_cuda STATIC cuda_runner.cu)
-target_link_libraries(example_vs_cuda PUBLIC gpu_runtime CUDA::cudart)
+target_link_libraries(example_vs_cuda PUBLIC gpu_runtime CUDA::cudart_static)
 target_include_directories(example_vs_cuda PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..   # for result.hpp / timings.hpp

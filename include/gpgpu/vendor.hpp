@@ -2,20 +2,23 @@
 
 // Vendor runtime entry points bound at run time.
 //
-// A consumer that calls OpenCL or Vulkan through these tables carries no link-time dependency on
-// libOpenCL / libvulkan: the loader library is dlopen'd once per process from the same candidate
-// paths the backend probes use, and every entry point is resolved by symbol. A process therefore
-// starts on a machine without the vendor runtime and simply sees a null table.
+// A consumer that calls OpenCL, Vulkan or Level Zero through these tables carries no link-time
+// dependency on libOpenCL / libvulkan / libze_loader: the loader library is dlopen'd once per
+// process from the same candidate paths the backend probes use, and every entry point is resolved
+// by symbol. A process therefore starts on a machine without the vendor runtime and simply sees a
+// null table.
 //
-// The vendored Khronos headers supply the types and constants only. VK_NO_PROTOTYPES is defined on
-// this library's public interface so that a direct vk* call in a consumer fails to compile instead
-// of silently re-introducing a link dependency. The OpenCL headers declare prototypes, so a direct
-// cl* call only fails at link time, and only as long as nothing else in the link pulls in
-// libOpenCL.
+// The vendored Khronos and Level Zero headers supply the types and constants only.
+// VK_NO_PROTOTYPES is defined on this library's public interface so that a direct vk* call in a
+// consumer fails to compile instead of silently re-introducing a link dependency. The OpenCL and
+// Level Zero headers declare prototypes, so a direct cl* or ze* call only fails at link time, and
+// only as long as nothing else in the link pulls in libOpenCL or libze_loader.
 
 #include <CL/cl.h>
 #include <CL/cl_function_types.h>
 #include <vulkan/vulkan_core.h>
+#include <ze_api.h>
+#include <ze_ddi.h>
 
 namespace gpgpu::vendor {
 
@@ -124,11 +127,54 @@ struct VulkanDeviceFns {
     PFN_vkCmdWriteTimestamp             vkCmdWriteTimestamp;
 };
 
+// Every Level Zero entry point the bundled tasks call. All members are non-null in a table returned
+// by level_zero().
+struct LevelZeroFns {
+    ze_pfnInit_t                                   zeInit;
+    ze_pfnDriverGet_t                              zeDriverGet;
+    ze_pfnDeviceGet_t                              zeDeviceGet;
+    ze_pfnDeviceGetProperties_t                    zeDeviceGetProperties;
+    ze_pfnDeviceGetModuleProperties_t              zeDeviceGetModuleProperties;
+    ze_pfnDeviceGetCommandQueueGroupProperties_t   zeDeviceGetCommandQueueGroupProperties;
+    ze_pfnContextCreate_t                          zeContextCreate;
+    ze_pfnContextDestroy_t                         zeContextDestroy;
+    ze_pfnCommandQueueCreate_t                     zeCommandQueueCreate;
+    ze_pfnCommandQueueDestroy_t                    zeCommandQueueDestroy;
+    ze_pfnCommandQueueExecuteCommandLists_t        zeCommandQueueExecuteCommandLists;
+    ze_pfnCommandQueueSynchronize_t                zeCommandQueueSynchronize;
+    ze_pfnCommandListCreate_t                      zeCommandListCreate;
+    ze_pfnCommandListDestroy_t                     zeCommandListDestroy;
+    ze_pfnCommandListClose_t                       zeCommandListClose;
+    ze_pfnCommandListReset_t                       zeCommandListReset;
+    ze_pfnCommandListAppendBarrier_t               zeCommandListAppendBarrier;
+    ze_pfnCommandListAppendMemoryCopy_t            zeCommandListAppendMemoryCopy;
+    ze_pfnCommandListAppendWriteGlobalTimestamp_t  zeCommandListAppendWriteGlobalTimestamp;
+    ze_pfnCommandListAppendLaunchKernel_t          zeCommandListAppendLaunchKernel;
+    ze_pfnEventPoolCreate_t                        zeEventPoolCreate;
+    ze_pfnEventPoolDestroy_t                       zeEventPoolDestroy;
+    ze_pfnEventCreate_t                            zeEventCreate;
+    ze_pfnEventDestroy_t                           zeEventDestroy;
+    ze_pfnEventHostReset_t                         zeEventHostReset;
+    ze_pfnEventQueryKernelTimestamp_t              zeEventQueryKernelTimestamp;
+    ze_pfnMemAllocDevice_t                         zeMemAllocDevice;
+    ze_pfnMemAllocHost_t                           zeMemAllocHost;
+    ze_pfnMemFree_t                                zeMemFree;
+    ze_pfnModuleCreate_t                           zeModuleCreate;
+    ze_pfnModuleDestroy_t                          zeModuleDestroy;
+    ze_pfnModuleBuildLogGetString_t                zeModuleBuildLogGetString;
+    ze_pfnModuleBuildLogDestroy_t                  zeModuleBuildLogDestroy;
+    ze_pfnKernelCreate_t                           zeKernelCreate;
+    ze_pfnKernelDestroy_t                          zeKernelDestroy;
+    ze_pfnKernelSetGroupSize_t                     zeKernelSetGroupSize;
+    ze_pfnKernelSetArgumentValue_t                 zeKernelSetArgumentValue;
+};
+
 // Loaded once per process from the same candidate paths the backend probes use; the loader library
 // stays mapped for the lifetime of the process. Returns nullptr when the library or any required
 // symbol is absent. Thread-safe; never throws, never terminates.
 const OpenClFns* opencl() noexcept;
 const VulkanFns* vulkan() noexcept;
+const LevelZeroFns* level_zero() noexcept;
 
 // Resolve the instance-level table for `instance`. Returns false when any member is missing; the
 // members that did resolve are still set, so a caller can tear the instance down.

@@ -18,14 +18,15 @@ cmake --build build
 ## Calling the vendor runtimes yourself
 
 `include/gpgpu/vendor.hpp` exposes the same run-time binding the probes use, so
-a consumer can drive OpenCL or Vulkan without linking `libOpenCL` / `libvulkan`:
-`gpgpu::vendor::opencl()` and `gpgpu::vendor::vulkan()` dlopen the loader once
-per process and return a table of resolved entry points, or `nullptr` when the
-runtime is absent. Vulkan instance- and device-level tables are filled with
-`load_instance_fns` / `load_device_fns` after the instance and device exist.
-The vendored Khronos headers are on the library's public include path for the
-types, and `VK_NO_PROTOTYPES` is defined publicly so a stray direct `vk*` call
-fails to compile.
+a consumer can drive OpenCL, Vulkan or Level Zero without linking `libOpenCL` /
+`libvulkan` / `libze_loader`: `gpgpu::vendor::opencl()`, `gpgpu::vendor::vulkan()`
+and `gpgpu::vendor::level_zero()` dlopen the loader once per process and return
+a table of resolved entry points, or `nullptr` when the runtime is absent.
+Vulkan instance- and device-level tables are filled with `load_instance_fns` /
+`load_device_fns` after the instance and device exist. The vendored Khronos and
+Level Zero headers are on the library's public include path for the types, and
+`VK_NO_PROTOTYPES` is defined publicly so a stray direct `vk*` call fails to
+compile.
 
 ## Third-party headers
 

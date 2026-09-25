@@ -136,6 +136,49 @@ bool resolve_all(VulkanDeviceFns& table, Resolver resolve) noexcept {
     return complete;
 }
 
+template <typename Resolver>
+bool resolve_all(LevelZeroFns& table, Resolver resolve) noexcept {
+    bool complete = true;
+    GPGPU_RESOLVE(zeInit)
+    GPGPU_RESOLVE(zeDriverGet)
+    GPGPU_RESOLVE(zeDeviceGet)
+    GPGPU_RESOLVE(zeDeviceGetProperties)
+    GPGPU_RESOLVE(zeDeviceGetModuleProperties)
+    GPGPU_RESOLVE(zeDeviceGetCommandQueueGroupProperties)
+    GPGPU_RESOLVE(zeContextCreate)
+    GPGPU_RESOLVE(zeContextDestroy)
+    GPGPU_RESOLVE(zeCommandQueueCreate)
+    GPGPU_RESOLVE(zeCommandQueueDestroy)
+    GPGPU_RESOLVE(zeCommandQueueExecuteCommandLists)
+    GPGPU_RESOLVE(zeCommandQueueSynchronize)
+    GPGPU_RESOLVE(zeCommandListCreate)
+    GPGPU_RESOLVE(zeCommandListDestroy)
+    GPGPU_RESOLVE(zeCommandListClose)
+    GPGPU_RESOLVE(zeCommandListReset)
+    GPGPU_RESOLVE(zeCommandListAppendBarrier)
+    GPGPU_RESOLVE(zeCommandListAppendMemoryCopy)
+    GPGPU_RESOLVE(zeCommandListAppendWriteGlobalTimestamp)
+    GPGPU_RESOLVE(zeCommandListAppendLaunchKernel)
+    GPGPU_RESOLVE(zeEventPoolCreate)
+    GPGPU_RESOLVE(zeEventPoolDestroy)
+    GPGPU_RESOLVE(zeEventCreate)
+    GPGPU_RESOLVE(zeEventDestroy)
+    GPGPU_RESOLVE(zeEventHostReset)
+    GPGPU_RESOLVE(zeEventQueryKernelTimestamp)
+    GPGPU_RESOLVE(zeMemAllocDevice)
+    GPGPU_RESOLVE(zeMemAllocHost)
+    GPGPU_RESOLVE(zeMemFree)
+    GPGPU_RESOLVE(zeModuleCreate)
+    GPGPU_RESOLVE(zeModuleDestroy)
+    GPGPU_RESOLVE(zeModuleBuildLogGetString)
+    GPGPU_RESOLVE(zeModuleBuildLogDestroy)
+    GPGPU_RESOLVE(zeKernelCreate)
+    GPGPU_RESOLVE(zeKernelDestroy)
+    GPGPU_RESOLVE(zeKernelSetGroupSize)
+    GPGPU_RESOLVE(zeKernelSetArgumentValue)
+    return complete;
+}
+
 #undef GPGPU_RESOLVE_OPTIONAL
 #undef GPGPU_RESOLVE
 
@@ -161,6 +204,14 @@ const VulkanFns* load_vulkan() noexcept {
     return complete ? &table : nullptr;
 }
 
+const LevelZeroFns* load_level_zero() noexcept {
+    const platform::LibHandle* lib = load_library(BackendId::OneAPI);
+    if (!lib) return nullptr;
+    static LevelZeroFns table{};
+    const bool complete = resolve_all(table, [lib](const char* name) { return lib->resolve(name); });
+    return complete ? &table : nullptr;
+}
+
 } // namespace
 
 const OpenClFns* opencl() noexcept {
@@ -170,6 +221,11 @@ const OpenClFns* opencl() noexcept {
 
 const VulkanFns* vulkan() noexcept {
     static const VulkanFns* const table = load_vulkan();
+    return table;
+}
+
+const LevelZeroFns* level_zero() noexcept {
+    static const LevelZeroFns* const table = load_level_zero();
     return table;
 }
 

@@ -1,11 +1,7 @@
-find_package(OpenCL QUIET)
-if(NOT OpenCL_FOUND)
-    set(EXAMPLE_VS_HAVE_OPENCL FALSE PARENT_SCOPE)
-    return()
-endif()
-
+# Headers come from gpu_runtime's vendored OpenCL-Headers and every entry point is
+# resolved at run time (gpgpu/vendor.hpp), so no OpenCL SDK is needed to build.
 add_library(example_vs_opencl STATIC opencl_runner.cpp)
-target_link_libraries(example_vs_opencl PUBLIC gpu_runtime OpenCL::OpenCL)
+target_link_libraries(example_vs_opencl PUBLIC gpu_runtime)
 target_include_directories(example_vs_opencl PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..

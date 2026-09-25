@@ -58,14 +58,14 @@ endforeach()
 target_include_directories(gpu_runtime
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        # Vendored Khronos headers, sourced via git submodules under
-        # external/<name>/ (README.md > "Third-party headers"). Public because
-        # gpgpu/vendor.hpp exposes their types to consumers.
+        # Vendored Khronos and Level Zero headers, sourced via git submodules
+        # under external/<name>/ (README.md > "Third-party headers"). Public
+        # because gpgpu/vendor.hpp exposes their types to consumers.
         $<BUILD_INTERFACE:${GPGPU_OPENCL_HEADERS_DIR}>
         $<BUILD_INTERFACE:${GPGPU_VULKAN_HEADERS_DIR}>
+        $<BUILD_INTERFACE:${GPGPU_LEVEL_ZERO_DIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${GPGPU_LEVEL_ZERO_DIR}
 )
 
 target_compile_definitions(gpu_runtime

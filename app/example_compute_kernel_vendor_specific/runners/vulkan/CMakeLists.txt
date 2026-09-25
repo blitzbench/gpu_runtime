@@ -1,12 +1,9 @@
-# Vulkan runner CMake. Requires the Vulkan loader + headers AND the shared
-# shader build (driven by app/.../shaders/CMakeLists.txt, processed before
-# this subdir at the parent CMakeLists level).
+# Vulkan runner CMake. Requires the shared shader build (driven by
+# app/.../shaders/CMakeLists.txt, processed before this subdir at the parent
+# CMakeLists level). Headers come from gpu_runtime's vendored Vulkan-Headers
+# (VK_NO_PROTOTYPES) and every entry point is resolved at run time
+# (gpgpu/vendor.hpp); only the shader build needs a tool from the Vulkan SDK.
 
-find_package(Vulkan QUIET)
-if(NOT Vulkan_FOUND)
-    set(EXAMPLE_VS_HAVE_VULKAN FALSE PARENT_SCOPE)
-    return()
-endif()
 if(NOT EXAMPLE_VS_HAVE_SHADER)
     message(STATUS "    VULKAN: skipped (shader build unavailable)")
     set(EXAMPLE_VS_HAVE_VULKAN FALSE PARENT_SCOPE)
@@ -15,7 +12,7 @@ endif()
 
 add_library(example_vs_vulkan STATIC vulkan_runner.cpp)
 add_dependencies(example_vs_vulkan example_vs_shader)
-target_link_libraries(example_vs_vulkan PUBLIC gpu_runtime Vulkan::Vulkan)
+target_link_libraries(example_vs_vulkan PUBLIC gpu_runtime)
 target_include_directories(example_vs_vulkan PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
