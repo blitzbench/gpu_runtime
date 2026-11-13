@@ -56,11 +56,12 @@ The identity is also available typed:
 software implementations such as Mesa's llvmpipe or pocl. They stay in the
 report and in `preferred()`; filter on `type()` to skip them.
 
-Within a report, an identity field one backend cannot report is filled from
-another backend's `Device` with the same id (the first that reports it, in
-probe order): an NVIDIA GPU's CUDA setup carries the PCI device id its Vulkan
-setup reports. A UUID is only filled where the
-backend reports none, since UUIDs differ between backends.
+Within a report, a PCI vendor id, PCI device id or type (when `Unknown`) that
+one backend cannot report is filled from another backend's `Device` with the
+same id (the first that reports it, in probe order): an NVIDIA GPU's CUDA
+setup carries the PCI device id its Vulkan setup reports. `uuid()` is never
+filled this way; it only holds what the setup's own backend reported, since
+UUIDs differ between backends.
 
 A backend can expose one physical device twice, for example two OpenCL
 platforms or two Vulkan drivers (RADV and AMDVLK) for the same GPU. Both

@@ -16,18 +16,17 @@ namespace backends {
 
 namespace {
 
-// The identity fields of one physical device, gathered from every backend that reports it.
+// The backend-independent identity fields of one physical device, gathered from every backend
+// that reports it. The UUID is not among them: it differs between backends for the same device.
 struct MergedIdentity {
     std::optional<std::uint16_t> pci_vendor_id;
     std::optional<std::uint16_t> pci_device_id;
-    std::optional<DeviceUuid> uuid;
     DeviceType type{DeviceType::Unknown};
 };
 
 void fill_missing_identity(Device& device, const MergedIdentity& merged) {
     if (!device.pci_vendor_id() && merged.pci_vendor_id) device.set_pci_vendor_id(*merged.pci_vendor_id);
     if (!device.pci_device_id() && merged.pci_device_id) device.set_pci_device_id(*merged.pci_device_id);
-    if (!device.uuid() && merged.uuid) device.set_uuid(*merged.uuid);
     if (device.type() == DeviceType::Unknown) device.set_type(merged.type);
 }
 
@@ -42,7 +41,6 @@ Report assemble_report(std::vector<ProbeResult> probes) {
             MergedIdentity& merged = identity[dev.id()];
             if (!merged.pci_vendor_id) merged.pci_vendor_id = dev.pci_vendor_id();
             if (!merged.pci_device_id) merged.pci_device_id = dev.pci_device_id();
-            if (!merged.uuid) merged.uuid = dev.uuid();
             if (merged.type == DeviceType::Unknown) merged.type = dev.type();
         }
     }

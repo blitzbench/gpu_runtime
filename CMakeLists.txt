@@ -40,6 +40,8 @@ endif()
 
 if(APPLE)
     list(APPEND GPGPU_SOURCES src/backends/metal.mm)
+    # metal.mm manages Objective-C references by hand; keep it out of a consumer's global ARC.
+    set_source_files_properties(src/backends/metal.mm PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
     enable_language(OBJCXX)
 endif()
 

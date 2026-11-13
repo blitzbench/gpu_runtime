@@ -204,12 +204,11 @@ TEST(AssembleReport, MergesIdentityFieldsAcrossBackends) {
         EXPECT_EQ(s.device.pci_vendor_id(), std::optional<std::uint16_t>(0x10de));
         EXPECT_EQ(s.device.pci_device_id(), std::optional<std::uint16_t>(0x2820));
         EXPECT_EQ(s.device.type(), DeviceType::Discrete);
-        ASSERT_TRUE(s.device.uuid().has_value());
     }
-    // A UUID a backend reports itself is kept; one it lacks comes from the first that has one.
-    EXPECT_EQ(*report[0].device.uuid(), *gpgpu::identity::uuid_from(kLlvmpipeUuid));
-    EXPECT_EQ(*report[1].device.uuid(), *gpgpu::identity::uuid_from(kLlvmpipeUuid));
-    EXPECT_EQ(*report[2].device.uuid(), *gpgpu::identity::uuid_from(kOtherUuid));
+    // UUIDs are backend-specific: each setup keeps its own backend's, and a missing one stays empty.
+    EXPECT_FALSE(report[0].device.uuid().has_value());
+    EXPECT_EQ(report[1].device.uuid(), gpgpu::identity::uuid_from(kLlvmpipeUuid));
+    EXPECT_EQ(report[2].device.uuid(), gpgpu::identity::uuid_from(kOtherUuid));
 }
 
 TEST(AssembleReport, DoesNotMergeAcrossDifferentIds) {

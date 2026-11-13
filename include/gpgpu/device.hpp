@@ -71,10 +71,10 @@ public:
     [[nodiscard]] const std::string& vendor_string() const noexcept { return vendor_string_; }
 
     // --- PCI and kind ---
-    // Absent when the device is not on PCI or no backend can report it. In a Report, a field one
-    // backend cannot report is filled from another backend's Device with the same id(), so every
-    // Setup of one physical device carries the same PCI ids; the UUID, being backend-specific, is
-    // only filled where the backend reports none.
+    // Absent when the device is not on PCI or no backend can report it. In a Report, a PCI id or a
+    // type one backend cannot report is filled from another backend's Device with the same id(), so
+    // every Setup of one physical device carries the same PCI ids. uuid() is backend-specific and
+    // only ever holds what that Setup's own backend reported.
     [[nodiscard]] const std::optional<PciAddress>& pci_address() const noexcept { return pci_address_; }
     [[nodiscard]] std::optional<std::uint16_t> pci_vendor_id() const noexcept { return pci_vendor_id_; }
     [[nodiscard]] std::optional<std::uint16_t> pci_device_id() const noexcept { return pci_device_id_; }
