@@ -8,12 +8,15 @@
 #include "cuda_runner.hpp"
 #include "lib_loader.hpp"
 
+#include <gpgpu/vendor.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 
 namespace example {
@@ -89,16 +92,8 @@ constexpr CUresult CUDA_SUCCESS = 0;
 // cuEventCreate flags: 0 = default (records wall-clock time for elapsed).
 constexpr unsigned int CU_EVENT_DEFAULT = 0;
 
-enum CUdevice_attribute : int {
-    CU_ATTR_PCI_BUS_ID    = 33,
-    CU_ATTR_PCI_DEVICE_ID = 34,
-    CU_ATTR_PCI_DOMAIN_ID = 50,
-};
-
 using PFN_cuInit               = CUresult (CUDA_STDCALL*)(unsigned int);
-using PFN_cuDeviceGetCount     = CUresult (CUDA_STDCALL*)(int*);
 using PFN_cuDeviceGet          = CUresult (CUDA_STDCALL*)(CUdevice*, int);
-using PFN_cuDeviceGetAttribute = CUresult (CUDA_STDCALL*)(int*, CUdevice_attribute, CUdevice);
 using PFN_cuCtxCreate          = CUresult (CUDA_STDCALL*)(CUcontext*, unsigned int, CUdevice);
 using PFN_cuCtxDestroy         = CUresult (CUDA_STDCALL*)(CUcontext);
 using PFN_cuCtxSynchronize     = CUresult (CUDA_STDCALL*)(void);
@@ -124,9 +119,7 @@ using PFN_cuMemcpyDtoHAsync    = CUresult (CUDA_STDCALL*)(void*, CUdeviceptr, st
 
 struct CuApi {
     PFN_cuInit               Init;
-    PFN_cuDeviceGetCount     DeviceGetCount;
     PFN_cuDeviceGet          DeviceGet;
-    PFN_cuDeviceGetAttribute DeviceGetAttribute;
     PFN_cuCtxCreate          CtxCreate;
     PFN_cuCtxDestroy         CtxDestroy;
     PFN_cuCtxSynchronize     CtxSynchronize;
@@ -159,9 +152,7 @@ Fn resolve_with_v2(const loader::Lib& lib, const char* base) {
 
 bool resolve(const loader::Lib& lib, CuApi& api) {
     api.Init               = lib.sym<PFN_cuInit>("cuInit");
-    api.DeviceGetCount     = lib.sym<PFN_cuDeviceGetCount>("cuDeviceGetCount");
     api.DeviceGet          = lib.sym<PFN_cuDeviceGet>("cuDeviceGet");
-    api.DeviceGetAttribute = lib.sym<PFN_cuDeviceGetAttribute>("cuDeviceGetAttribute");
     api.CtxCreate          = resolve_with_v2<PFN_cuCtxCreate>(lib, "cuCtxCreate");
     api.CtxDestroy         = resolve_with_v2<PFN_cuCtxDestroy>(lib, "cuCtxDestroy");
     api.CtxSynchronize     = lib.sym<PFN_cuCtxSynchronize>("cuCtxSynchronize");
@@ -181,7 +172,7 @@ bool resolve(const loader::Lib& lib, CuApi& api) {
     api.EventElapsedTime   = lib.sym<PFN_cuEventElapsedTime>("cuEventElapsedTime");
     api.MemcpyHtoDAsync    = resolve_with_v2<PFN_cuMemcpyHtoDAsync>(lib, "cuMemcpyHtoDAsync");
     api.MemcpyDtoHAsync    = resolve_with_v2<PFN_cuMemcpyDtoHAsync>(lib, "cuMemcpyDtoHAsync");
-    return api.Init && api.DeviceGetCount && api.DeviceGet && api.DeviceGetAttribute &&
+    return api.Init && api.DeviceGet &&
            api.CtxCreate && api.CtxDestroy && api.CtxSynchronize &&
            api.ModuleLoadData && api.ModuleUnload && api.ModuleGetFunction &&
            api.MemAlloc && api.MemFree && api.MemcpyHtoD && api.MemcpyDtoH &&
@@ -197,28 +188,6 @@ std::string err_str(const CuApi& api, CUresult r) {
         if (api.GetErrorString(r, &s) == CUDA_SUCCESS && s) return s;
     }
     return "cuda error " + std::to_string(r);
-}
-
-// Build the same id string the gpgpu CUDA probe builds for a given device.
-std::string device_bdf(const CuApi& api, CUdevice dev) {
-    int dom = 0, bus = 0, devid = 0;
-    api.DeviceGetAttribute(&dom,   CU_ATTR_PCI_DOMAIN_ID, dev);
-    api.DeviceGetAttribute(&bus,   CU_ATTR_PCI_BUS_ID,    dev);
-    api.DeviceGetAttribute(&devid, CU_ATTR_PCI_DEVICE_ID, dev);
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "pci-%04x:%02x:%02x.0", dom, bus, devid);
-    return buf;
-}
-
-CUdevice find_matching_device(const CuApi& api, const gpgpu::Device& target) {
-    int n = 0;
-    if (api.DeviceGetCount(&n) != CUDA_SUCCESS) return -1;
-    for (int i = 0; i < n; ++i) {
-        CUdevice d = 0;
-        if (api.DeviceGet(&d, i) != CUDA_SUCCESS) continue;
-        if (device_bdf(api, d) == target.id()) return d;
-    }
-    return -1;
 }
 
 } // namespace
@@ -243,8 +212,11 @@ RunResult run_vector_add_cuda(const gpgpu::Setup&    setup,
     CUresult rc = api.Init(0);
     if (rc != CUDA_SUCCESS) { r.error = "cuInit: " + err_str(api, rc); return r; }
 
-    CUdevice device = find_matching_device(api, setup.device);
-    if (device < 0) { r.error = "no CUDA device matched " + setup.device.id(); return r; }
+    const std::optional<int> ordinal = gpgpu::vendor::find_cuda_device(setup.device);
+    CUdevice device = 0;
+    if (!ordinal || api.DeviceGet(&device, *ordinal) != CUDA_SUCCESS) {
+        r.error = "no CUDA device matched " + setup.device.id(); return r;
+    }
 
     r.timings.copy_h2d_size = 2 * bytes;
     r.timings.copy_d2h_size = bytes;

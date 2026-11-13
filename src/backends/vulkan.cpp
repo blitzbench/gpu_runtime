@@ -13,20 +13,39 @@
 #include <string>
 #include <vector>
 
+#include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_identity.hpp"
 
 namespace gpgpu::backends {
 
 namespace {
 
-std::string format_uuid(const std::uint8_t u[VK_UUID_SIZE]) {
-    char buf[40];
-    std::snprintf(buf, sizeof(buf),
-                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
+DeviceType device_type(VkPhysicalDeviceType type) {
+    switch (type) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return DeviceType::Discrete;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return DeviceType::Integrated;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return DeviceType::Virtual;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU:            return DeviceType::Cpu;
+        default:                                     return DeviceType::Unknown;
+    }
+}
+
+bool supports_extension(const VulkanIdentityFns& fns, VkPhysicalDevice device, const char* name) {
+    if (!fns.vkEnumerateDeviceExtensionProperties) return false;
+    std::uint32_t count = 0;
+    if (fns.vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS) {
+        return false;
+    }
+    std::vector<VkExtensionProperties> extensions(count);
+    if (fns.vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extensions.data()) != VK_SUCCESS) {
+        return false;
+    }
+    for (const auto& e : extensions) {
+        if (std::strncmp(e.extensionName, name, VK_MAX_EXTENSION_NAME_SIZE) == 0) return true;
+    }
+    return false;
 }
 
 std::string format_api_version(std::uint32_t v) {
@@ -37,6 +56,43 @@ std::string format_api_version(std::uint32_t v) {
 }
 
 } // namespace
+
+void read_vulkan_identity(const VulkanIdentityFns& fns, VkPhysicalDevice device, Device& out) {
+    VkPhysicalDeviceProperties props{};
+    fns.vkGetPhysicalDeviceProperties(device, &props);
+    out.set_type(device_type(props.deviceType));
+
+    // vendorID holds the PCI vendor id for a vendor that has one; Khronos-assigned ids for
+    // non-PCI vendors start at 0x10000.
+    const bool pci_vendor = props.vendorID <= 0xFFFF;
+    if (pci_vendor) {
+        out.set_pci_vendor_id(static_cast<std::uint16_t>(props.vendorID));
+        if (props.deviceID <= 0xFFFF) out.set_pci_device_id(static_cast<std::uint16_t>(props.deviceID));
+    }
+
+    if (fns.vkGetPhysicalDeviceProperties2 && props.apiVersion >= VK_API_VERSION_1_1) {
+        VkPhysicalDevicePCIBusInfoPropertiesEXT pci{};
+        pci.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT;
+        VkPhysicalDeviceIDProperties ids{};
+        ids.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+        const bool has_pci = supports_extension(fns, device, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME);
+        if (has_pci) ids.pNext = &pci;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &ids;
+        fns.vkGetPhysicalDeviceProperties2(device, &props2);
+
+        if (has_pci) {
+            out.set_pci_address(PciAddress{pci.pciDomain, pci.pciBus, pci.pciDevice, pci.pciFunction});
+        }
+        if (auto uuid = identity::uuid_from(ids.deviceUUID)) out.set_uuid(*uuid);
+    }
+
+    char backend_id[80];
+    std::snprintf(backend_id, sizeof(backend_id), "vk-%04x:%04x-%s", props.vendorID, props.deviceID,
+                  identity::format_uuid(props.pipelineCacheUUID).c_str());
+    identity::assign_id(out, backend_id);
+}
 
 ProbeResult probe_vulkan() {
     ProbeResult out;
@@ -112,6 +168,15 @@ ProbeResult probe_vulkan() {
         resolve_instance("vkGetPhysicalDeviceProperties"));
     auto vkGetPhysicalDeviceMemoryProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
         resolve_instance("vkGetPhysicalDeviceMemoryProperties"));
+    const VulkanIdentityFns identity_fns{
+        vkGetPhysicalDeviceProperties,
+        instance_api >= VK_API_VERSION_1_1
+            ? reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+                  resolve_instance("vkGetPhysicalDeviceProperties2"))
+            : nullptr,
+        reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+            resolve_instance("vkEnumerateDeviceExtensionProperties")),
+    };
 
     if (!vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceProperties) {
         if (vkDestroyInstance) vkDestroyInstance(instance, nullptr);
@@ -157,12 +222,7 @@ ProbeResult probe_vulkan() {
             if (device_local > 0) d.set_memory(device_local);
         }
 
-        // Stable id: vendor:device + pipelineCacheUUID (uniquely identifies a
-        // driver+device pair across boots).
-        char id[80];
-        std::snprintf(id, sizeof(id), "vk-%04x:%04x-%s", props.vendorID, props.deviceID,
-                      format_uuid(props.pipelineCacheUUID).c_str());
-        d.set_id(id);
+        read_vulkan_identity(identity_fns, pd, d);
 
         out.devices.push_back(std::move(d));
     }

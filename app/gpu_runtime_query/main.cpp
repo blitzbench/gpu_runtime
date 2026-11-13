@@ -38,6 +38,13 @@ std::string fmt_opt_str(const std::optional<std::string>& v) {
 
 std::string yn(bool b) { return b ? "yes" : "no"; }
 
+std::string fmt_opt_hex16(const std::optional<std::uint16_t>& v) {
+    if (!v) return "n/a";
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%04x", *v);
+    return buf;
+}
+
 } // namespace
 
 int main() {
@@ -67,9 +74,14 @@ int main() {
 
     for (const auto& dev : report.devices()) {
         std::printf("  [%s] %s\n", dev.id().c_str(), dev.name().c_str());
-        std::printf("      vendor=%s (%s)\n",
+        std::printf("      vendor=%s (%s)  type=%s\n",
                     std::string(gpgpu::to_string(dev.vendor())).c_str(),
-                    dev.vendor_string().c_str());
+                    dev.vendor_string().c_str(),
+                    std::string(gpgpu::to_string(dev.type())).c_str());
+        std::printf("      pci=%s  pci_id=%s:%s\n",
+                    dev.pci_address() ? gpgpu::to_string(*dev.pci_address()).c_str() : "n/a",
+                    fmt_opt_hex16(dev.pci_vendor_id()).c_str(),
+                    fmt_opt_hex16(dev.pci_device_id()).c_str());
         std::printf("      memory=%s  bandwidth=%s GB/s  bus_width=%s bits  L2=%s\n",
                     fmt_opt_bytes(dev.memory()).c_str(),
                     fmt_opt(dev.memory_bandwidth_gbps()).c_str(),
@@ -98,6 +110,15 @@ int main() {
                         s.backend.version().empty() ? "-" : s.backend.version().c_str(),
                         std::string(gpgpu::to_string(s.preferred)).c_str());
         }
+    }
+
+    std::printf("\n== Preferred ==\n");
+    for (const auto& s : report.preferred()) {
+        std::printf("  [%s] %-8s preferred=%-8s type=%s\n",
+                    s.device.id().c_str(),
+                    std::string(s.backend.name()).c_str(),
+                    std::string(gpgpu::to_string(s.preferred)).c_str(),
+                    std::string(gpgpu::to_string(s.device.type())).c_str());
     }
 
     return 0;

@@ -5,6 +5,7 @@
 #include "probe.hpp"
 
 #include <ze_api.h>
+#include <ze_ddi.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -12,8 +13,10 @@
 #include <string>
 #include <vector>
 
+#include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_identity.hpp"
 
 namespace gpgpu::backends {
 
@@ -41,16 +44,45 @@ std::string format_api_version(ze_api_version_t v) {
     return buf;
 }
 
-std::string format_uuid(const std::uint8_t u[ZE_MAX_UUID_SIZE]) {
-    char buf[40];
-    std::snprintf(buf, sizeof(buf),
-                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
+DeviceType device_type(const ze_device_properties_t& props) {
+    switch (props.type) {
+        case ZE_DEVICE_TYPE_GPU:
+            return (props.flags & ZE_DEVICE_PROPERTY_FLAG_INTEGRATED) != 0 ? DeviceType::Integrated
+                                                                          : DeviceType::Discrete;
+        case ZE_DEVICE_TYPE_CPU:
+            return DeviceType::Cpu;
+        default:
+            return DeviceType::Unknown;
+    }
 }
 
 } // namespace
+
+void read_level_zero_identity(ze_pfnDevicePciGetPropertiesExt_t pci_properties,
+                              ze_device_handle_t device,
+                              const ze_device_properties_t& props,
+                              std::uint32_t ordinal,
+                              Device& out) {
+    out.set_type(device_type(props));
+    if (props.vendorId <= 0xFFFF) out.set_pci_vendor_id(static_cast<std::uint16_t>(props.vendorId));
+    if (props.deviceId <= 0xFFFF) out.set_pci_device_id(static_cast<std::uint16_t>(props.deviceId));
+
+    if (pci_properties) {
+        ze_pci_ext_properties_t pci{};
+        pci.stype = ZE_STRUCTURE_TYPE_PCI_EXT_PROPERTIES;
+        if (ok(pci_properties(device, &pci))) {
+            out.set_pci_address(PciAddress{pci.address.domain, pci.address.bus,
+                                           pci.address.device, pci.address.function});
+        }
+    }
+
+    if (auto uuid = identity::uuid_from(props.uuid.id)) out.set_uuid(*uuid);
+
+    char backend_id[32];
+    std::snprintf(backend_id, sizeof(backend_id), "ze-%04x:%04x-%u",
+                  props.vendorId, props.deviceId, ordinal);
+    identity::assign_id(out, backend_id);
+}
 
 ProbeResult probe_oneapi() {
     ProbeResult out;
@@ -70,6 +102,7 @@ ProbeResult probe_oneapi() {
     auto zeDeviceGetProperties = platform::resolve_as<PFN_zeDeviceGetProperties>(lib, "zeDeviceGetProperties");
     auto zeDeviceGetCompute    = platform::resolve_as<PFN_zeDeviceGetComputeProperties>(lib, "zeDeviceGetComputeProperties");
     auto zeDeviceGetMemory     = platform::resolve_as<PFN_zeDeviceGetMemoryProperties>(lib, "zeDeviceGetMemoryProperties");
+    auto zeDevicePciGetProps   = platform::resolve_as<ze_pfnDevicePciGetPropertiesExt_t>(lib, "zeDevicePciGetPropertiesExt");
 
     if (!zeInit || !zeDriverGet || !zeDeviceGet || !zeDeviceGetProperties) {
         out.backend = Backend(BackendId::OneAPI, /*version*/ {}, lib_path,
@@ -98,6 +131,7 @@ ProbeResult probe_oneapi() {
     zeDriverGet(&n_drivers, drivers.data());
 
     std::string best_api_version;
+    std::uint32_t ordinal = 0;
     for (auto drv : drivers) {
         if (zeDriverGetApiVersion) {
             ze_api_version_t api = ZE_API_VERSION_1_0;
@@ -113,6 +147,7 @@ ProbeResult probe_oneapi() {
         zeDeviceGet(drv, &n_devs, devs.data());
 
         for (auto h : devs) {
+            const std::uint32_t device_ordinal = ordinal++;
             ze_device_properties_t props{};
             props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
             if (!ok(zeDeviceGetProperties(h, &props))) continue;
@@ -177,10 +212,7 @@ ProbeResult probe_oneapi() {
             d.set_fp16(true);
             d.set_int8(true);
 
-            char id[80];
-            std::snprintf(id, sizeof(id), "ze-%04x:%04x-%s", props.vendorId, props.deviceId,
-                          format_uuid(props.uuid.id).c_str());
-            d.set_id(id);
+            read_level_zero_identity(zeDevicePciGetProps, h, props, device_ordinal, d);
 
             out.devices.push_back(std::move(d));
         }

@@ -11,6 +11,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <gpgpu/vendor.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -37,18 +39,6 @@ NSString* const kKernelSource = @
 
 constexpr NSUInteger kThreadgroup = 256;
 
-id<MTLDevice> find_matching_device(const gpgpu::Device& target) {
-    NSArray<id<MTLDevice>>* devs = MTLCopyAllDevices();
-    if (!devs) return nil;
-    for (id<MTLDevice> d in devs) {
-        char id_buf[40];
-        std::snprintf(id_buf, sizeof(id_buf), "metal-%llx",
-                      (unsigned long long)[d registryID]);
-        if (std::string(id_buf) == target.id()) return d;
-    }
-    return devs.count > 0 ? devs[0] : nil;
-}
-
 } // namespace
 
 RunResult run_vector_add_metal(const gpgpu::Setup&    setup,
@@ -66,7 +56,7 @@ RunResult run_vector_add_metal(const gpgpu::Setup&    setup,
     r.timings.copy_d2h_size = bytes;
 
     @autoreleasepool {
-        id<MTLDevice> device = find_matching_device(setup.device);
+        id<MTLDevice> device = gpgpu::vendor::find_metal_device(setup.device);
         if (!device) { r.error = "no Metal device matched " + setup.device.id(); return r; }
 
         id<MTLCommandQueue> queue = [device newCommandQueue];

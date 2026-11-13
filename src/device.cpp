@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <string>
 
 namespace gpgpu {
@@ -48,6 +49,32 @@ Vendor classify_vendor_pci(std::uint32_t pci_vendor_id) noexcept {
         case 0x13B5: return Vendor::ARM;
         default:     return Vendor::Unknown;
     }
+}
+
+bool operator==(const PciAddress& a, const PciAddress& b) noexcept {
+    return a.domain == b.domain && a.bus == b.bus && a.device == b.device && a.function == b.function;
+}
+
+bool operator!=(const PciAddress& a, const PciAddress& b) noexcept {
+    return !(a == b);
+}
+
+std::string to_string(const PciAddress& address) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04x:%02x:%02x.%x",
+                  address.domain, address.bus, address.device, address.function);
+    return buf;
+}
+
+std::string_view to_string(DeviceType t) noexcept {
+    switch (t) {
+        case DeviceType::Discrete:   return "Discrete";
+        case DeviceType::Integrated: return "Integrated";
+        case DeviceType::Virtual:    return "Virtual";
+        case DeviceType::Cpu:        return "Cpu";
+        case DeviceType::Unknown:    return "Unknown";
+    }
+    return "Unknown";
 }
 
 } // namespace gpgpu

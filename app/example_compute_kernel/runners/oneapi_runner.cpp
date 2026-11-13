@@ -8,6 +8,7 @@
 #include "oneapi_runner.hpp"
 #include "lib_loader.hpp"
 
+#include <gpgpu/vendor.hpp>
 #include <ze_api.h>
 
 #include <chrono>
@@ -28,8 +29,6 @@ constexpr std::uint32_t kGroupSize = 256;
 
 // --- function pointer subset (ze_api.h omits PFN typedefs) ---
 using PFN_zeInit                       = ze_result_t (ZE_APICALL*)(ze_init_flags_t);
-using PFN_zeDriverGet                  = ze_result_t (ZE_APICALL*)(uint32_t*, ze_driver_handle_t*);
-using PFN_zeDeviceGet                  = ze_result_t (ZE_APICALL*)(ze_driver_handle_t, uint32_t*, ze_device_handle_t*);
 using PFN_zeDeviceGetProperties        = ze_result_t (ZE_APICALL*)(ze_device_handle_t, ze_device_properties_t*);
 using PFN_zeContextCreate              = ze_result_t (ZE_APICALL*)(ze_driver_handle_t, const ze_context_desc_t*, ze_context_handle_t*);
 using PFN_zeContextDestroy             = ze_result_t (ZE_APICALL*)(ze_context_handle_t);
@@ -71,8 +70,6 @@ using PFN_zeEventQueryKernelTimestamp  = ze_result_t (ZE_APICALL*)(ze_event_hand
 
 struct ZeApi {
     PFN_zeInit                            Init;
-    PFN_zeDriverGet                       DriverGet;
-    PFN_zeDeviceGet                       DeviceGet;
     PFN_zeDeviceGetProperties             DeviceGetProperties;
     PFN_zeContextCreate                   ContextCreate;
     PFN_zeContextDestroy                  ContextDestroy;
@@ -104,8 +101,6 @@ struct ZeApi {
 
 bool resolve(const loader::Lib& lib, ZeApi& api) {
     api.Init                            = lib.sym<PFN_zeInit>("zeInit");
-    api.DriverGet                       = lib.sym<PFN_zeDriverGet>("zeDriverGet");
-    api.DeviceGet                       = lib.sym<PFN_zeDeviceGet>("zeDeviceGet");
     api.DeviceGetProperties             = lib.sym<PFN_zeDeviceGetProperties>("zeDeviceGetProperties");
     api.ContextCreate                   = lib.sym<PFN_zeContextCreate>("zeContextCreate");
     api.ContextDestroy                  = lib.sym<PFN_zeContextDestroy>("zeContextDestroy");
@@ -133,7 +128,7 @@ bool resolve(const loader::Lib& lib, ZeApi& api) {
     api.EventCreate                     = lib.sym<PFN_zeEventCreate>("zeEventCreate");
     api.EventDestroy                    = lib.sym<PFN_zeEventDestroy>("zeEventDestroy");
     api.EventQueryKernelTimestamp       = lib.sym<PFN_zeEventQueryKernelTimestamp>("zeEventQueryKernelTimestamp");
-    return api.Init && api.DriverGet && api.DeviceGet && api.DeviceGetProperties &&
+    return api.Init && api.DeviceGetProperties &&
            api.ContextCreate && api.ContextDestroy &&
            api.CommandQueueCreate && api.CommandQueueDestroy &&
            api.CommandQueueExecuteCommandLists && api.CommandQueueSynchronize &&
@@ -145,46 +140,6 @@ bool resolve(const loader::Lib& lib, ZeApi& api) {
            api.MemAllocDevice && api.MemFree &&
            api.EventPoolCreate && api.EventPoolDestroy &&
            api.EventCreate && api.EventDestroy && api.EventQueryKernelTimestamp;
-}
-
-std::string format_uuid(const std::uint8_t u[ZE_MAX_DEVICE_UUID_SIZE]) {
-    char buf[40];
-    std::snprintf(buf, sizeof(buf),
-                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
-}
-
-bool find_matching_device(const ZeApi& api, const gpgpu::Device& target,
-                          ze_driver_handle_t& out_driver,
-                          ze_device_handle_t& out_device) {
-    std::uint32_t n_drv = 0;
-    api.DriverGet(&n_drv, nullptr);
-    if (n_drv == 0) return false;
-    std::vector<ze_driver_handle_t> drivers(n_drv);
-    api.DriverGet(&n_drv, drivers.data());
-    for (auto drv : drivers) {
-        std::uint32_t n_dev = 0;
-        api.DeviceGet(drv, &n_dev, nullptr);
-        if (n_dev == 0) continue;
-        std::vector<ze_device_handle_t> devs(n_dev);
-        api.DeviceGet(drv, &n_dev, devs.data());
-        for (auto d : devs) {
-            ze_device_properties_t p{};
-            p.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
-            if (api.DeviceGetProperties(d, &p) != ZE_RESULT_SUCCESS) continue;
-            char id[80];
-            std::snprintf(id, sizeof(id), "ze-%04x:%04x-%s", p.vendorId, p.deviceId,
-                          format_uuid(p.uuid.id).c_str());
-            if (target.id() == id) {
-                out_driver = drv;
-                out_device = d;
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 } // namespace
@@ -216,7 +171,8 @@ RunResult run_vector_add_oneapi(const gpgpu::Setup&    setup,
 
     ze_driver_handle_t drv = nullptr;
     ze_device_handle_t dev = nullptr;
-    if (!find_matching_device(api, setup.device, drv, dev)) {
+    const gpgpu::vendor::LevelZeroFns* ze = gpgpu::vendor::level_zero();
+    if (!ze || !gpgpu::vendor::find_level_zero_device(*ze, setup.device, drv, dev)) {
         r.error = "no Level Zero device matched " + setup.device.id();
         return r;
     }

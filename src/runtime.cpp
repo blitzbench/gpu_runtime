@@ -1,5 +1,6 @@
 #include "gpgpu/runtime.hpp"
 
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -8,18 +9,9 @@
 
 namespace gpgpu {
 
-Report Runtime::query() {
-    std::vector<backends::ProbeResult> probes;
-    probes.reserve(6);
-    probes.push_back(backends::probe_cuda());
-    probes.push_back(backends::probe_rocm());
-    probes.push_back(backends::probe_oneapi());
-    probes.push_back(backends::probe_opencl());
-    probes.push_back(backends::probe_vulkan());
-    probes.push_back(backends::probe_metal());
+namespace backends {
 
-    // Group all backend ids per physical device (by Device::id()) so we can
-    // assign Preference correctly.
+Report assemble_report(std::vector<ProbeResult> probes) {
     std::unordered_map<std::string, std::vector<BackendId>> per_device;
     for (const auto& p : probes) {
         for (const auto& dev : p.devices) {
@@ -44,6 +36,20 @@ Report Runtime::query() {
     }
 
     return Report(std::move(setups), std::move(backends_out));
+}
+
+} // namespace backends
+
+Report Runtime::query() {
+    std::vector<backends::ProbeResult> probes;
+    probes.reserve(6);
+    probes.push_back(backends::probe_cuda());
+    probes.push_back(backends::probe_rocm());
+    probes.push_back(backends::probe_oneapi());
+    probes.push_back(backends::probe_opencl());
+    probes.push_back(backends::probe_vulkan());
+    probes.push_back(backends::probe_metal());
+    return backends::assemble_report(std::move(probes));
 }
 
 } // namespace gpgpu

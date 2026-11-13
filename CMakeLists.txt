@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(gpu_runtime LANGUAGES CXX VERSION 0.1.0)
+project(gpu_runtime LANGUAGES CXX VERSION 0.2.0)
+
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(GPGPU_TOP_LEVEL ON)
+else()
+    set(GPGPU_TOP_LEVEL OFF)
+endif()
+option(GPGPU_BUILD_TESTS "Build the gpu_runtime unit tests" ${GPGPU_TOP_LEVEL})
 
 if(NOT DEFINED GPGPU_BUILD_MODE)
     set(GPGPU_BUILD_MODE STATIC)
@@ -9,6 +16,7 @@ endif()
 set(GPGPU_SOURCES
     src/backend.cpp
     src/device.cpp
+    src/identity.cpp
     src/preference.cpp
     src/report.cpp
     src/runtime.cpp
@@ -111,4 +119,13 @@ if(BUILD_SAMPLE_APP)
     add_subdirectory(app/gpu_runtime_query)
     add_subdirectory(app/example_compute_kernel)
     add_subdirectory(app/example_compute_kernel_vendor_specific)
+endif()
+
+if(GPGPU_BUILD_TESTS)
+    if(NOT GPGPU_BUILD_MODE STREQUAL "STATIC")
+        message(FATAL_ERROR "gpu_runtime: GPGPU_BUILD_TESTS requires GPGPU_BUILD_MODE STATIC; "
+                            "the tests call internal functions the shared library does not export.")
+    endif()
+    enable_testing()
+    add_subdirectory(test)
 endif()

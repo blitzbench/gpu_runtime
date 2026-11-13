@@ -20,12 +20,21 @@
 #include <ze_api.h>
 #include <ze_ddi.h>
 
+#include <optional>
+
+#include "device.hpp"
+
+#if defined(__APPLE__) && defined(__OBJC__)
+#import <Metal/Metal.h>
+#endif
+
 namespace gpgpu::vendor {
 
 // Every OpenCL entry point the bundled tasks call. All members are non-null in a table returned by
 // opencl().
 struct OpenClFns {
     clGetPlatformIDs_fn                    clGetPlatformIDs;
+    clGetPlatformInfo_fn                   clGetPlatformInfo;
     clGetDeviceIDs_fn                      clGetDeviceIDs;
     clGetDeviceInfo_fn                     clGetDeviceInfo;
     clCreateContext_fn                     clCreateContext;
@@ -128,7 +137,8 @@ struct VulkanDeviceFns {
 };
 
 // Every Level Zero entry point the bundled tasks call. All members are non-null in a table returned
-// by level_zero().
+// by level_zero(), except zeDevicePciGetPropertiesExt, which a loader predating the PCI properties
+// extension does not export.
 struct LevelZeroFns {
     ze_pfnInit_t                                   zeInit;
     ze_pfnDriverGet_t                              zeDriverGet;
@@ -167,6 +177,7 @@ struct LevelZeroFns {
     ze_pfnKernelDestroy_t                          zeKernelDestroy;
     ze_pfnKernelSetGroupSize_t                     zeKernelSetGroupSize;
     ze_pfnKernelSetArgumentValue_t                 zeKernelSetArgumentValue;
+    ze_pfnDevicePciGetPropertiesExt_t              zeDevicePciGetPropertiesExt;
 };
 
 // Loaded once per process from the same candidate paths the backend probes use; the loader library
@@ -183,5 +194,37 @@ bool load_instance_fns(const VulkanFns& global, VkInstance instance, VulkanInsta
 // Resolve the device-level table for `device`. Returns false when any member is missing; the
 // members that did resolve are still set, so a caller can tear the device down.
 bool load_device_fns(const VulkanInstanceFns& instance_fns, VkDevice device, VulkanDeviceFns& out) noexcept;
+
+// Native-handle lookups. Each one enumerates the backend's devices, derives every device's id with
+// the code the probe uses, and returns the one whose id equals target.id(). A consumer never
+// rebuilds an id itself. When a backend exposes one physical device twice (two OpenCL platforms or
+// two Vulkan drivers for the same GPU), the first in enumeration order is returned, which is the
+// one Report::preferred() picks.
+
+// `instance` must have been created with apiVersion 1.1 or later: below that the PCI address and
+// UUID are unreadable and a device query() identified by them is not found.
+VkPhysicalDevice find_vulkan_device(const VulkanInstanceFns& fns, VkInstance instance,
+                                    const Device& target) noexcept;
+
+// zeInit must have been called. Returns false and leaves the outputs untouched when no device
+// matches.
+bool find_level_zero_device(const LevelZeroFns& fns, const Device& target,
+                            ze_driver_handle_t& driver, ze_device_handle_t& device) noexcept;
+
+// Returns nullptr when no device matches.
+cl_device_id find_opencl_device(const OpenClFns& fns, const Device& target) noexcept;
+
+// Device ordinal for cuDeviceGet / cudaSetDevice. The CUDA driver library is loaded once per
+// process; nullopt when it is absent or no device matches.
+std::optional<int> find_cuda_device(const Device& target) noexcept;
+
+// Device ordinal for hipSetDevice. The HIP runtime library is loaded once per process; nullopt
+// when it is absent or no device matches.
+std::optional<int> find_hip_device(const Device& target) noexcept;
+
+#if defined(__APPLE__) && defined(__OBJC__)
+// Returns nil when no device matches.
+id<MTLDevice> find_metal_device(const Device& target) noexcept;
+#endif
 
 } // namespace gpgpu::vendor

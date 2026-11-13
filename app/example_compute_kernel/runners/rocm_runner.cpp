@@ -11,11 +11,14 @@
 #include "rocm_runner.hpp"
 #include "lib_loader.hpp"
 
+#include <gpgpu/vendor.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -56,9 +59,7 @@ enum hipMemcpyKind : int {
 };
 
 using PFN_hipInit                = hipError_t (HIP_STDCALL*)(unsigned int);
-using PFN_hipGetDeviceCount      = hipError_t (HIP_STDCALL*)(int*);
 using PFN_hipSetDevice           = hipError_t (HIP_STDCALL*)(int);
-using PFN_hipDeviceGetPCIBusId   = hipError_t (HIP_STDCALL*)(char*, int, int);
 using PFN_hipMalloc              = hipError_t (HIP_STDCALL*)(void**, std::size_t);
 using PFN_hipFree                = hipError_t (HIP_STDCALL*)(void*);
 using PFN_hipMemcpy              = hipError_t (HIP_STDCALL*)(void*, const void*, std::size_t, hipMemcpyKind);
@@ -81,9 +82,7 @@ using PFN_hipEventElapsedTime    = hipError_t (HIP_STDCALL*)(float* /*ms*/, hipE
 
 struct HipApi {
     PFN_hipInit               Init;
-    PFN_hipGetDeviceCount     GetDeviceCount;
     PFN_hipSetDevice          SetDevice;
-    PFN_hipDeviceGetPCIBusId  DeviceGetPCIBusId;
     PFN_hipMalloc             Malloc;
     PFN_hipFree               Free;
     PFN_hipMemcpy             Memcpy;
@@ -103,9 +102,7 @@ struct HipApi {
 
 bool resolve_hip(const loader::Lib& lib, HipApi& api) {
     api.Init               = lib.sym<PFN_hipInit>("hipInit");
-    api.GetDeviceCount     = lib.sym<PFN_hipGetDeviceCount>("hipGetDeviceCount");
     api.SetDevice          = lib.sym<PFN_hipSetDevice>("hipSetDevice");
-    api.DeviceGetPCIBusId  = lib.sym<PFN_hipDeviceGetPCIBusId>("hipDeviceGetPCIBusId");
     api.Malloc             = lib.sym<PFN_hipMalloc>("hipMalloc");
     api.Free               = lib.sym<PFN_hipFree>("hipFree");
     api.Memcpy             = lib.sym<PFN_hipMemcpy>("hipMemcpy");
@@ -121,7 +118,7 @@ bool resolve_hip(const loader::Lib& lib, HipApi& api) {
     api.EventRecord        = lib.sym<PFN_hipEventRecord>("hipEventRecord");
     api.EventSynchronize   = lib.sym<PFN_hipEventSynchronize>("hipEventSynchronize");
     api.EventElapsedTime   = lib.sym<PFN_hipEventElapsedTime>("hipEventElapsedTime");
-    return api.Init && api.GetDeviceCount && api.SetDevice && api.DeviceGetPCIBusId &&
+    return api.Init && api.SetDevice &&
            api.Malloc && api.Free && api.Memcpy && api.MemcpyAsync &&
            api.DeviceSynchronize &&
            api.ModuleLoadData && api.ModuleUnload && api.ModuleGetFunction &&
@@ -192,17 +189,6 @@ std::string hiprtc_path_from(const std::string& hip_path) {
 #endif
 }
 
-int find_matching_device(const HipApi& api, const gpgpu::Device& target) {
-    int n = 0;
-    if (api.GetDeviceCount(&n) != hipSuccess) return -1;
-    for (int i = 0; i < n; ++i) {
-        char bdf[32] = {0};
-        if (api.DeviceGetPCIBusId(bdf, sizeof(bdf), i) != hipSuccess) continue;
-        if (std::string("pci-") + bdf == target.id()) return i;
-    }
-    return -1;
-}
-
 } // namespace
 
 RunResult run_vector_add_rocm(const gpgpu::Setup&    setup,
@@ -232,8 +218,9 @@ RunResult run_vector_add_rocm(const gpgpu::Setup&    setup,
     hipError_t hrc = hip.Init(0);
     if (hrc != hipSuccess) { r.error = "hipInit: " + hip_err(hip, hrc); return r; }
 
-    int dev = find_matching_device(hip, setup.device);
-    if (dev < 0) { r.error = "no HIP device matched " + setup.device.id(); return r; }
+    const std::optional<int> ordinal = gpgpu::vendor::find_hip_device(setup.device);
+    if (!ordinal) { r.error = "no HIP device matched " + setup.device.id(); return r; }
+    const int dev = *ordinal;
 
     hip.SetDevice(dev);
 

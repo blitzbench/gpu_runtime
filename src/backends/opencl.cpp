@@ -6,25 +6,25 @@
 
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
+#include <CL/cl_function_types.h>
 
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_identity.hpp"
 
 namespace gpgpu::backends {
 
 namespace {
-
-using PFN_clGetPlatformIDs   = cl_int (CL_API_CALL*)(cl_uint, cl_platform_id*, cl_uint*);
-using PFN_clGetPlatformInfo  = cl_int (CL_API_CALL*)(cl_platform_id, cl_platform_info, std::size_t, void*, std::size_t*);
-using PFN_clGetDeviceIDs     = cl_int (CL_API_CALL*)(cl_platform_id, cl_device_type, cl_uint, cl_device_id*, cl_uint*);
-using PFN_clGetDeviceInfo    = cl_int (CL_API_CALL*)(cl_device_id, cl_device_info, std::size_t, void*, std::size_t*);
 
 // AMD topology layout (cl_amd_device_topology is declared in cl_ext.h as a
 // union; we use a POD struct here for trivial init and copy).
@@ -36,21 +36,16 @@ struct DeviceTopologyAmd {
     char    function;
 };
 
-// Khronos PCI bus info extension struct (cl_device_pci_bus_info_khr).
-struct PciBusInfoKhr {
-    cl_uint pci_domain;
-    cl_uint pci_bus;
-    cl_uint pci_device;
-    cl_uint pci_function;
-};
-
 // NVIDIA-specific OpenCL extension query keys (cl_nv_device_attribute_query).
 // These are not part of the Khronos headers - NVIDIA documents them in their
 // OpenCL Best Practices Guide but does not contribute them upstream.
-constexpr cl_device_info CL_DEVICE_PCI_BUS_ID_NV  = 0x4008;
-constexpr cl_device_info CL_DEVICE_PCI_SLOT_ID_NV = 0x4009;
+constexpr cl_device_info CL_DEVICE_PCI_BUS_ID_NV    = 0x4008;
+constexpr cl_device_info CL_DEVICE_PCI_SLOT_ID_NV   = 0x4009;
+constexpr cl_device_info CL_DEVICE_PCI_DOMAIN_ID_NV = 0x400A;
 
-std::string info_string(PFN_clGetDeviceInfo fn, cl_device_id dev, cl_device_info key) {
+constexpr cl_uint CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD = 1;
+
+std::string info_string(clGetDeviceInfo_fn fn, cl_device_id dev, cl_device_info key) {
     std::size_t size = 0;
     if (fn(dev, key, 0, nullptr, &size) != CL_SUCCESS || size == 0) return {};
     std::string out(size, '\0');
@@ -60,23 +55,17 @@ std::string info_string(PFN_clGetDeviceInfo fn, cl_device_id dev, cl_device_info
 }
 
 template <typename T>
-bool info_scalar(PFN_clGetDeviceInfo fn, cl_device_id dev, cl_device_info key, T& out) {
+bool info_scalar(clGetDeviceInfo_fn fn, cl_device_id dev, cl_device_info key, T& out) {
     return fn(dev, key, sizeof(T), &out, nullptr) == CL_SUCCESS;
 }
 
-std::string platform_info_string(PFN_clGetPlatformInfo fn, cl_platform_id p, cl_platform_info key) {
+std::string platform_info_string(clGetPlatformInfo_fn fn, cl_platform_id p, cl_platform_info key) {
     std::size_t size = 0;
     if (fn(p, key, 0, nullptr, &size) != CL_SUCCESS || size == 0) return {};
     std::string out(size, '\0');
     if (fn(p, key, size, out.data(), nullptr) != CL_SUCCESS) return {};
     if (!out.empty() && out.back() == '\0') out.pop_back();
     return out;
-}
-
-std::string format_pci_bdf(unsigned domain, unsigned bus, unsigned dev, unsigned func) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "pci-%04x:%02x:%02x.%x", domain, bus, dev, func);
-    return buf;
 }
 
 std::string trim(std::string s) {
@@ -86,15 +75,98 @@ std::string trim(std::string s) {
     return s.substr(i);
 }
 
-// Skip Microsoft's OpenCLOn12 / D3D12 mapping layer (software renderer).
-bool is_software_compat_platform(const std::string& platform_name,
-                                 const std::string& platform_version) {
-    if (platform_name.find("OpenCLOn12") != std::string::npos) return true;
-    if (platform_version.find("D3D12 Implementation") != std::string::npos) return true;
+bool has_extension(const std::string& extensions, std::string_view name) {
+    std::size_t pos = 0;
+    while ((pos = extensions.find(name, pos)) != std::string::npos) {
+        const std::size_t end = pos + name.size();
+        const bool starts = pos == 0 || extensions[pos - 1] == ' ';
+        const bool ends = end == extensions.size() || extensions[end] == ' ';
+        if (starts && ends) return true;
+        pos = end;
+    }
     return false;
 }
 
+std::optional<PciAddress> read_pci_address(clGetDeviceInfo_fn fn, cl_device_id dev,
+                                           const std::string& extensions) {
+    if (has_extension(extensions, "cl_khr_pci_bus_info")) {
+        cl_device_pci_bus_info_khr info{};
+        if (info_scalar(fn, dev, CL_DEVICE_PCI_BUS_INFO_KHR, info)) {
+            return PciAddress{info.pci_domain, info.pci_bus, info.pci_device, info.pci_function};
+        }
+    }
+    if (has_extension(extensions, "cl_nv_device_attribute_query")) {
+        cl_uint bus = 0, slot = 0;
+        if (info_scalar(fn, dev, CL_DEVICE_PCI_BUS_ID_NV, bus) &&
+            info_scalar(fn, dev, CL_DEVICE_PCI_SLOT_ID_NV, slot)) {
+            // Drivers older than CL_DEVICE_PCI_DOMAIN_ID_NV report bus and slot only; domain 0
+            // is assumed for them, which can only be wrong on a multi-segment host.
+            cl_uint domain = 0;
+            info_scalar(fn, dev, CL_DEVICE_PCI_DOMAIN_ID_NV, domain);
+            return PciAddress{domain, bus, (slot >> 3) & 0x1F, slot & 0x7};
+        }
+    }
+    if (has_extension(extensions, "cl_amd_device_attribute_query")) {
+        DeviceTopologyAmd topo{};
+        if (info_scalar(fn, dev, CL_DEVICE_TOPOLOGY_AMD, topo) &&
+            topo.type == CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD) {
+            // cl_amd_device_topology has no domain field; domain 0 is assumed, which can only
+            // be wrong on a multi-segment host.
+            return PciAddress{0,
+                              static_cast<unsigned char>(topo.bus),
+                              static_cast<unsigned char>(topo.device),
+                              static_cast<unsigned char>(topo.function)};
+        }
+    }
+    return std::nullopt;
+}
+
+DeviceType read_device_type(clGetDeviceInfo_fn fn, cl_device_id dev) {
+    cl_device_type type = 0;
+    if (!info_scalar(fn, dev, CL_DEVICE_TYPE, type)) return DeviceType::Unknown;
+    if (type & CL_DEVICE_TYPE_CPU) return DeviceType::Cpu;
+    if (type & CL_DEVICE_TYPE_GPU) {
+        cl_bool unified = CL_FALSE;
+        if (!info_scalar(fn, dev, CL_DEVICE_HOST_UNIFIED_MEMORY, unified)) return DeviceType::Unknown;
+        return unified ? DeviceType::Integrated : DeviceType::Discrete;
+    }
+    return DeviceType::Unknown;
+}
+
 } // namespace
+
+void read_opencl_identity(clGetDeviceInfo_fn get_device_info, cl_device_id device, Device& out) {
+    out.set_type(read_device_type(get_device_info, device));
+
+    cl_uint vendor_id = 0;
+    info_scalar(get_device_info, device, CL_DEVICE_VENDOR_ID, vendor_id);
+
+    const std::string extensions = info_string(get_device_info, device, CL_DEVICE_EXTENSIONS);
+    if (auto address = read_pci_address(get_device_info, device, extensions)) {
+        out.set_pci_address(*address);
+        // CL_DEVICE_VENDOR_ID is only specified to be the PCI vendor id for a PCI device.
+        if (vendor_id <= 0xFFFF) out.set_pci_vendor_id(static_cast<std::uint16_t>(vendor_id));
+    }
+
+    if (has_extension(extensions, "cl_khr_device_uuid")) {
+        std::uint8_t bytes[CL_UUID_SIZE_KHR] = {0};
+        if (get_device_info(device, CL_DEVICE_UUID_KHR, sizeof(bytes), bytes, nullptr) == CL_SUCCESS) {
+            if (auto uuid = identity::uuid_from(bytes)) out.set_uuid(*uuid);
+        }
+    }
+
+    char backend_id[64];
+    std::snprintf(backend_id, sizeof(backend_id), "ocl-%04x-%p", vendor_id,
+                  static_cast<void*>(device));
+    identity::assign_id(out, backend_id);
+}
+
+bool is_skipped_opencl_platform(clGetPlatformInfo_fn get_platform_info, cl_platform_id platform) {
+    const std::string name = platform_info_string(get_platform_info, platform, CL_PLATFORM_NAME);
+    const std::string version = platform_info_string(get_platform_info, platform, CL_PLATFORM_VERSION);
+    return name.find("OpenCLOn12") != std::string::npos ||
+           version.find("D3D12 Implementation") != std::string::npos;
+}
 
 ProbeResult probe_opencl() {
     ProbeResult out;
@@ -107,10 +179,10 @@ ProbeResult probe_opencl() {
     }
     const std::string lib_path = lib.path();
 
-    auto clGetPlatformIDs  = platform::resolve_as<PFN_clGetPlatformIDs>(lib, "clGetPlatformIDs");
-    auto clGetPlatformInfo = platform::resolve_as<PFN_clGetPlatformInfo>(lib, "clGetPlatformInfo");
-    auto clGetDeviceIDs    = platform::resolve_as<PFN_clGetDeviceIDs>(lib, "clGetDeviceIDs");
-    auto clGetDeviceInfo   = platform::resolve_as<PFN_clGetDeviceInfo>(lib, "clGetDeviceInfo");
+    auto clGetPlatformIDs  = platform::resolve_as<clGetPlatformIDs_fn>(lib, "clGetPlatformIDs");
+    auto clGetPlatformInfo = platform::resolve_as<clGetPlatformInfo_fn>(lib, "clGetPlatformInfo");
+    auto clGetDeviceIDs    = platform::resolve_as<clGetDeviceIDs_fn>(lib, "clGetDeviceIDs");
+    auto clGetDeviceInfo   = platform::resolve_as<clGetDeviceInfo_fn>(lib, "clGetDeviceInfo");
 
     if (!clGetPlatformIDs || !clGetDeviceIDs || !clGetDeviceInfo || !clGetPlatformInfo) {
         out.backend = Backend(BackendId::OpenCL, /*version*/ {}, lib_path,
@@ -133,10 +205,8 @@ ProbeResult probe_opencl() {
 
     for (cl_platform_id p : platforms) {
         std::string pver = platform_info_string(clGetPlatformInfo, p, CL_PLATFORM_VERSION);
-        std::string pname = platform_info_string(clGetPlatformInfo, p, CL_PLATFORM_NAME);
 
-        // skip software renderer before version bookkeeping
-        if (is_software_compat_platform(pname, pver)) continue;
+        if (is_skipped_opencl_platform(clGetPlatformInfo, p)) continue;
         // CL_PLATFORM_VERSION is shaped "OpenCL <major>.<minor> ...". Extract.
         const std::string prefix = "OpenCL ";
         std::string short_ver;
@@ -212,33 +282,7 @@ ProbeResult probe_opencl() {
 
             d.set_driver_version(info_string(clGetDeviceInfo, dev, CL_DRIVER_VERSION));
 
-            // Stable id: prefer KHR PCI bus info, then NVIDIA ext, then AMD topology.
-            std::string id_str;
-            PciBusInfoKhr khr{};
-            if (clGetDeviceInfo(dev, CL_DEVICE_PCI_BUS_INFO_KHR, sizeof(khr), &khr, nullptr) == CL_SUCCESS) {
-                id_str = format_pci_bdf(khr.pci_domain, khr.pci_bus, khr.pci_device, khr.pci_function);
-            } else if (v == Vendor::Nvidia) {
-                cl_uint bus = 0, slot = 0;
-                bool have_bus = info_scalar(clGetDeviceInfo, dev, CL_DEVICE_PCI_BUS_ID_NV, bus);
-                bool have_slot = info_scalar(clGetDeviceInfo, dev, CL_DEVICE_PCI_SLOT_ID_NV, slot);
-                if (have_bus && have_slot) {
-                    id_str = format_pci_bdf(0, bus, (slot >> 3) & 0x1F, slot & 0x7);
-                }
-            } else if (v == Vendor::AMD) {
-                DeviceTopologyAmd topo{};
-                if (clGetDeviceInfo(dev, CL_DEVICE_TOPOLOGY_AMD, sizeof(topo), &topo, nullptr) == CL_SUCCESS) {
-                    id_str = format_pci_bdf(0,
-                        static_cast<unsigned>(static_cast<unsigned char>(topo.bus)),
-                        static_cast<unsigned>(static_cast<unsigned char>(topo.device)),
-                        static_cast<unsigned>(static_cast<unsigned char>(topo.function)));
-                }
-            }
-            if (id_str.empty()) {
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "ocl-%04x-%p", vendor_id, dev);
-                id_str = buf;
-            }
-            d.set_id(std::move(id_str));
+            read_opencl_identity(clGetDeviceInfo, dev, d);
 
             out.devices.push_back(std::move(d));
         }

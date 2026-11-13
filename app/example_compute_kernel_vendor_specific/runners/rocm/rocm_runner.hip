@@ -6,12 +6,14 @@
 
 #include "rocm_runner.hpp"
 
+#include <gpgpu/vendor.hpp>
 #include <hip/hip_runtime.h>
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 
 namespace example {
@@ -23,17 +25,6 @@ constexpr unsigned kBlockSize = 256;
 __global__ void vector_add(const float* a, const float* b, float* c, unsigned n) {
     unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
-}
-
-int find_matching_device(const gpgpu::Device& target) {
-    int n = 0;
-    if (hipGetDeviceCount(&n) != hipSuccess || n == 0) return -1;
-    for (int i = 0; i < n; ++i) {
-        char bdf[32] = {0};
-        if (hipDeviceGetPCIBusId(bdf, sizeof(bdf), i) != hipSuccess) continue;
-        if (target.id() == std::string("pci-") + bdf) return i;
-    }
-    return -1;
 }
 
 std::chrono::duration<double> elapsed(hipEvent_t a, hipEvent_t b) {
@@ -57,8 +48,9 @@ RunResult run_vector_add_rocm(const gpgpu::Setup&    setup,
     r.timings.copy_h2d_size = 2 * bytes;
     r.timings.copy_d2h_size = bytes;
 
-    const int dev = find_matching_device(setup.device);
-    if (dev < 0) { r.error = "no HIP device matched " + setup.device.id(); return r; }
+    const std::optional<int> ordinal = gpgpu::vendor::find_hip_device(setup.device);
+    if (!ordinal) { r.error = "no HIP device matched " + setup.device.id(); return r; }
+    const int dev = *ordinal;
     if (hipSetDevice(dev) != hipSuccess) { r.error = "hipSetDevice failed"; return r; }
 
     float *dA = nullptr, *dB = nullptr, *dC = nullptr;

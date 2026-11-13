@@ -11,6 +11,7 @@
 #include "vulkan_runner.hpp"
 #include "lib_loader.hpp"
 
+#include <gpgpu/vendor.hpp>
 #include <vulkan/vulkan_core.h>
 
 #include <chrono>
@@ -158,34 +159,6 @@ void load_device(const InstanceApi& i, VkDevice dev, DeviceApi& a) {
 
 // --- helpers --------------------------------------------------------------
 
-// Format a stable id matching the gpgpu Vulkan probe:
-//   "vk-<vendor>:<device>-<pipelineCacheUUID>"
-std::string format_id(const VkPhysicalDeviceProperties& p) {
-    const auto& u = p.pipelineCacheUUID;
-    char buf[80];
-    std::snprintf(buf, sizeof(buf),
-                  "vk-%04x:%04x-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  p.vendorID, p.deviceID,
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
-}
-
-VkPhysicalDevice find_matching_device(const InstanceApi& i, VkInstance inst,
-                                      const gpgpu::Device& target) {
-    std::uint32_t n = 0;
-    i.EnumeratePhysicalDevices(inst, &n, nullptr);
-    if (n == 0) return VK_NULL_HANDLE;
-    std::vector<VkPhysicalDevice> phys(n);
-    i.EnumeratePhysicalDevices(inst, &n, phys.data());
-    for (auto pd : phys) {
-        VkPhysicalDeviceProperties props{};
-        i.GetPhysicalDeviceProperties(pd, &props);
-        if (format_id(props) == target.id()) return pd;
-    }
-    return VK_NULL_HANDLE;
-}
-
 std::uint32_t find_compute_queue_family(const InstanceApi& i, VkPhysicalDevice pd) {
     std::uint32_t n = 0;
     i.GetPhysicalDeviceQueueFamilyProperties(pd, &n, nullptr);
@@ -313,7 +286,11 @@ RunResult run_vector_add_vulkan(const gpgpu::Setup&    setup,
     InstanceApi i{};
     load_instance(g, inst, i);
 
-    VkPhysicalDevice pd = find_matching_device(i, inst, setup.device);
+    const gpgpu::vendor::VulkanFns* vk = gpgpu::vendor::vulkan();
+    gpgpu::vendor::VulkanInstanceFns lookup_fns{};
+    VkPhysicalDevice pd = vk && gpgpu::vendor::load_instance_fns(*vk, inst, lookup_fns)
+                              ? gpgpu::vendor::find_vulkan_device(lookup_fns, inst, setup.device)
+                              : VK_NULL_HANDLE;
     if (!pd) {
         i.DestroyInstance(inst, nullptr);
         r.error = "no Vulkan device matched " + setup.device.id();

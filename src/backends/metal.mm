@@ -5,12 +5,16 @@
 
 #include "probe.hpp"
 
+#include "gpgpu/vendor.hpp"
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <string>
+
+#include "../identity.hpp"
 
 namespace gpgpu::backends {
 
@@ -32,6 +36,20 @@ Vendor classify_metal_device(id<MTLDevice> d) {
         return Vendor::Apple;
     }
     return Vendor::Unknown;
+}
+
+// Metal exposes neither a PCI address nor a UUID, so every Metal device has a backend-specific id.
+void read_metal_identity(id<MTLDevice> dev, std::size_t index, Device& out) {
+    if ([dev respondsToSelector:@selector(hasUnifiedMemory)]) {
+        out.set_type([dev hasUnifiedMemory] ? DeviceType::Integrated : DeviceType::Discrete);
+    }
+    std::string backend_id = "metal-" + std::to_string(index);
+    if ([dev respondsToSelector:@selector(registryID)]) {
+        char id_buf[40];
+        std::snprintf(id_buf, sizeof(id_buf), "metal-%llx", (unsigned long long)[dev registryID]);
+        backend_id = id_buf;
+    }
+    identity::assign_id(out, backend_id);
 }
 
 } // namespace
@@ -76,14 +94,7 @@ ProbeResult probe_metal() {
             if (sm > 0) d.set_shared_memory_per_block((std::uint32_t)sm);
         }
 
-        // Metal exposes a stable registryID per device.
-        if ([dev respondsToSelector:@selector(registryID)]) {
-            char id_buf[40];
-            std::snprintf(id_buf, sizeof(id_buf), "metal-%llx",
-                          (unsigned long long)[dev registryID]);
-            d.set_id(id_buf);
-        }
-        if (d.id().empty()) d.set_id("metal-" + std::to_string(out.devices.size()));
+        read_metal_identity(dev, out.devices.size(), d);
 
         d.set_driver_version(version_buf);
 
@@ -101,5 +112,20 @@ ProbeResult probe_metal() {
 }
 
 } // namespace gpgpu::backends
+
+namespace gpgpu::vendor {
+
+id<MTLDevice> find_metal_device(const Device& target) noexcept {
+    NSArray<id<MTLDevice>>* devs = MTLCopyAllDevices();
+    std::size_t index = 0;
+    for (id<MTLDevice> dev in devs) {
+        Device candidate;
+        backends::read_metal_identity(dev, index++, candidate);
+        if (candidate.id() == target.id()) return dev;
+    }
+    return nil;
+}
+
+} // namespace gpgpu::vendor
 
 #endif // __APPLE__

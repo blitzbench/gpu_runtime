@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -23,15 +24,59 @@ std::string_view to_string(Vendor v) noexcept;
 Vendor classify_vendor(std::string_view raw) noexcept;
 Vendor classify_vendor_pci(std::uint32_t pci_vendor_id) noexcept;
 
+// PCI bus address (domain:bus:device.function) of a device attached over PCI.
+struct PciAddress {
+    std::uint32_t domain{0};
+    std::uint32_t bus{0};
+    std::uint32_t device{0};
+    std::uint32_t function{0};
+};
+
+bool operator==(const PciAddress& a, const PciAddress& b) noexcept;
+bool operator!=(const PciAddress& a, const PciAddress& b) noexcept;
+
+// Canonical "DDDD:BB:DD.F" form, lower-case hex, as Linux sysfs and lspci -D print it.
+std::string to_string(const PciAddress& address);
+
+// Device UUID as reported by the backend (Vulkan deviceUUID, Level Zero / CUDA / OpenCL UUID).
+// UUIDs are only guaranteed to be stable within one backend; across backends only the PCI address
+// identifies a device.
+using DeviceUuid = std::array<std::uint8_t, 16>;
+
+enum class DeviceType : std::uint8_t {
+    Discrete,
+    Integrated,
+    Virtual,
+    Cpu,      // a software implementation on the host CPU (Mesa llvmpipe, pocl, ...)
+    Unknown,
+};
+
+std::string_view to_string(DeviceType t) noexcept;
+
 class Device {
 public:
     Device() = default;
 
     // --- stable identity ---
+    // Identifies the physical device. Every backend derives it by the same rule, so a device seen
+    // by several backends has the same id in each of them whenever its PCI address is known:
+    //   1. "pci-DDDD:BB:DD.F" when the backend reports the PCI address;
+    //   2. otherwise "uuid-<8-4-4-4-12 hex>" when it reports a non-zero device UUID;
+    //   3. otherwise a backend-specific id that only identifies the device within that backend.
+    // Use the lookup helpers in gpgpu/vendor.hpp to find a backend's native handle for a Device;
+    // never re-derive the id format.
     [[nodiscard]] const std::string& id() const noexcept { return id_; }
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
     [[nodiscard]] Vendor vendor() const noexcept { return vendor_; }
     [[nodiscard]] const std::string& vendor_string() const noexcept { return vendor_string_; }
+
+    // --- PCI and kind ---
+    // Absent when the device is not on PCI or the backend cannot report it.
+    [[nodiscard]] const std::optional<PciAddress>& pci_address() const noexcept { return pci_address_; }
+    [[nodiscard]] std::optional<std::uint16_t> pci_vendor_id() const noexcept { return pci_vendor_id_; }
+    [[nodiscard]] std::optional<std::uint16_t> pci_device_id() const noexcept { return pci_device_id_; }
+    [[nodiscard]] const std::optional<DeviceUuid>& uuid() const noexcept { return uuid_; }
+    [[nodiscard]] DeviceType type() const noexcept { return type_; }
 
     // --- memory ---
     [[nodiscard]] std::optional<std::uint64_t> memory() const noexcept { return memory_; }
@@ -70,6 +115,11 @@ public:
     Device& set_name(std::string v) { name_ = std::move(v); return *this; }
     Device& set_vendor(Vendor v) { vendor_ = v; return *this; }
     Device& set_vendor_string(std::string v) { vendor_string_ = std::move(v); return *this; }
+    Device& set_pci_address(PciAddress v) { pci_address_ = v; return *this; }
+    Device& set_pci_vendor_id(std::uint16_t v) { pci_vendor_id_ = v; return *this; }
+    Device& set_pci_device_id(std::uint16_t v) { pci_device_id_ = v; return *this; }
+    Device& set_uuid(const DeviceUuid& v) { uuid_ = v; return *this; }
+    Device& set_type(DeviceType v) { type_ = v; return *this; }
     Device& set_memory(std::uint64_t v) { memory_ = v; return *this; }
     Device& set_memory_bandwidth_gbps(std::uint64_t v) { memory_bandwidth_gbps_ = v; return *this; }
     Device& set_l2_cache_bytes(std::uint64_t v) { l2_cache_bytes_ = v; return *this; }
@@ -94,6 +144,12 @@ private:
     std::string name_;
     Vendor vendor_{Vendor::Unknown};
     std::string vendor_string_;
+
+    std::optional<PciAddress> pci_address_;
+    std::optional<std::uint16_t> pci_vendor_id_;
+    std::optional<std::uint16_t> pci_device_id_;
+    std::optional<DeviceUuid> uuid_;
+    DeviceType type_{DeviceType::Unknown};
 
     std::optional<std::uint64_t> memory_;
     std::optional<std::uint64_t> memory_bandwidth_gbps_;

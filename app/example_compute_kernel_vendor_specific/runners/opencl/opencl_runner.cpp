@@ -37,44 +37,6 @@ __kernel void vector_add(
 
 constexpr std::size_t kLocalSize = 256;
 
-std::string info_string(const OpenClFns& cl, cl_device_id dev, cl_device_info key) {
-    std::size_t n = 0;
-    if (cl.clGetDeviceInfo(dev, key, 0, nullptr, &n) != CL_SUCCESS || n == 0) return {};
-    std::string s(n, '\0');
-    if (cl.clGetDeviceInfo(dev, key, n, s.data(), nullptr) != CL_SUCCESS) return {};
-    if (!s.empty() && s.back() == '\0') s.pop_back();
-    return s;
-}
-
-template <typename T>
-T info_scalar(const OpenClFns& cl, cl_device_id dev, cl_device_info key) {
-    T v{};
-    cl.clGetDeviceInfo(dev, key, sizeof(T), &v, nullptr);
-    return v;
-}
-
-cl_device_id find_matching_device(const OpenClFns& cl, const gpgpu::Device& target) {
-    cl_uint n_platforms = 0;
-    if (cl.clGetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0) return nullptr;
-    std::vector<cl_platform_id> platforms(n_platforms);
-    cl.clGetPlatformIDs(n_platforms, platforms.data(), nullptr);
-    for (cl_platform_id p : platforms) {
-        cl_uint n_devs = 0;
-        if (cl.clGetDeviceIDs(p, CL_DEVICE_TYPE_ALL, 0, nullptr, &n_devs) != CL_SUCCESS) continue;
-        if (n_devs == 0) continue;
-        std::vector<cl_device_id> devs(n_devs);
-        cl.clGetDeviceIDs(p, CL_DEVICE_TYPE_ALL, n_devs, devs.data(), nullptr);
-        for (cl_device_id d : devs) {
-            const std::string name = info_string(cl, d, CL_DEVICE_NAME);
-            const cl_ulong   mem   = info_scalar<cl_ulong>(cl, d, CL_DEVICE_GLOBAL_MEM_SIZE);
-            const bool name_ok = (name == target.name());
-            const bool mem_ok  = (!target.memory().has_value() || mem == *target.memory());
-            if (name_ok && mem_ok) return d;
-        }
-    }
-    return nullptr;
-}
-
 std::chrono::duration<double> event_span(const OpenClFns& cl, cl_event start, cl_event end) {
     cl_ulong t0 = 0, t1 = 0;
     cl.clGetEventProfilingInfo(start, CL_PROFILING_COMMAND_START, sizeof(t0), &t0, nullptr);
@@ -112,7 +74,7 @@ RunResult run_vector_add_opencl(const gpgpu::Setup&    setup,
     if (!cl_fns) { r.error = "OpenCL loader unavailable"; return r; }
     const OpenClFns& cl = *cl_fns;
 
-    cl_device_id device = find_matching_device(cl, setup.device);
+    cl_device_id device = gpgpu::vendor::find_opencl_device(cl, setup.device);
     if (!device) { r.error = "no OpenCL device matched " + setup.device.id(); return r; }
 
     cl_int err = CL_SUCCESS;

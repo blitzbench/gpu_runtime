@@ -5,28 +5,26 @@
 #include "probe.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 
+#include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_identity.hpp"
 
 namespace gpgpu::backends {
 
 namespace {
 
-using hipError_t = int;
-using hipDevice_t = int;
-
 constexpr hipError_t hipSuccess = 0;
 
-using PFN_hipGetDeviceCount    = hipError_t (*)(int*);
-using PFN_hipDeviceGet         = hipError_t (*)(hipDevice_t*, int);
-using PFN_hipDeviceGetName     = hipError_t (*)(char*, int, hipDevice_t);
-using PFN_hipDeviceTotalMem    = hipError_t (*)(std::size_t*, hipDevice_t);
-using PFN_hipDriverGetVersion  = hipError_t (*)(int*);
-using PFN_hipRuntimeGetVersion = hipError_t (*)(int*);
-using PFN_hipDeviceGetPCIBusId = hipError_t (*)(char*, int, hipDevice_t);
+using PFN_hipDeviceGetName     = hipError_t (GPGPU_STDCALL*)(char*, int, hipDevice_t);
+using PFN_hipDeviceTotalMem    = hipError_t (GPGPU_STDCALL*)(std::size_t*, hipDevice_t);
+using PFN_hipDriverGetVersion  = hipError_t (GPGPU_STDCALL*)(int*);
+using PFN_hipRuntimeGetVersion = hipError_t (GPGPU_STDCALL*)(int*);
 
 bool ok(hipError_t r) { return r == hipSuccess; }
 
@@ -40,7 +38,52 @@ std::string format_version(int v) {
     return buf;
 }
 
+constexpr std::uint16_t kAmdPciVendorId = 0x1002;
+
+hipDevice_t device_for_ordinal(const HipIdentityFns& fns, int ordinal) {
+    hipDevice_t device = ordinal;
+    if (fns.hipDeviceGet) {
+        hipDevice_t resolved = 0;
+        if (ok(fns.hipDeviceGet(&resolved, ordinal))) device = resolved;
+    }
+    return device;
+}
+
 } // namespace
+
+void read_hip_identity(const HipIdentityFns& fns, hipDevice_t device, int ordinal, Device& out) {
+    if (fns.hipDeviceGetPCIBusId) {
+        char bdf[32] = {0};
+        if (ok(fns.hipDeviceGetPCIBusId(bdf, sizeof(bdf), device))) {
+            if (auto address = identity::parse_pci_address(bdf)) {
+                out.set_pci_address(*address);
+                out.set_pci_vendor_id(kAmdPciVendorId);
+            }
+        }
+    }
+
+    if (fns.hipDeviceGetUuid) {
+        HipUuid raw{};
+        if (ok(fns.hipDeviceGetUuid(&raw, device))) {
+            std::uint8_t bytes[16];
+            std::memcpy(bytes, raw.bytes, sizeof(bytes));
+            if (auto uuid = identity::uuid_from(bytes)) out.set_uuid(*uuid);
+        }
+    }
+
+    identity::assign_id(out, "hip-" + std::to_string(ordinal));
+}
+
+std::optional<int> find_hip_ordinal(const HipIdentityFns& fns, const Device& target) {
+    int count = 0;
+    if (!ok(fns.hipGetDeviceCount(&count))) return std::nullopt;
+    for (int i = 0; i < count; ++i) {
+        Device candidate;
+        read_hip_identity(fns, device_for_ordinal(fns, i), i, candidate);
+        if (candidate.id() == target.id()) return i;
+    }
+    return std::nullopt;
+}
 
 ProbeResult probe_rocm() {
     ProbeResult out;
@@ -60,6 +103,7 @@ ProbeResult probe_rocm() {
     auto hipDriverGetVersion  = platform::resolve_as<PFN_hipDriverGetVersion>(lib, "hipDriverGetVersion");
     auto hipRuntimeGetVersion = platform::resolve_as<PFN_hipRuntimeGetVersion>(lib, "hipRuntimeGetVersion");
     auto hipDeviceGetPCIBusId = platform::resolve_as<PFN_hipDeviceGetPCIBusId>(lib, "hipDeviceGetPCIBusId");
+    auto hipDeviceGetUuid     = platform::resolve_as<PFN_hipDeviceGetUuid>(lib, "hipDeviceGetUuid");
 
     if (!hipGetDeviceCount) {
         out.backend = Backend(BackendId::ROCm, /*version*/ {}, lib_path,
@@ -85,15 +129,13 @@ ProbeResult probe_rocm() {
         return out;
     }
 
+    const HipIdentityFns identity_fns{hipGetDeviceCount, hipDeviceGet, hipDeviceGetPCIBusId,
+                                      hipDeviceGetUuid};
     for (int i = 0; i < count; ++i) {
         Device d;
         d.set_vendor(Vendor::AMD).set_vendor_string("Advanced Micro Devices, Inc.");
 
-        hipDevice_t dev = i;
-        if (hipDeviceGet) {
-            hipDevice_t got = 0;
-            if (ok(hipDeviceGet(&got, i))) dev = got;
-        }
+        const hipDevice_t dev = device_for_ordinal(identity_fns, i);
 
         if (hipDeviceGetName) {
             char name_buf[256] = {0};
@@ -109,14 +151,7 @@ ProbeResult probe_rocm() {
 
         if (!version_str.empty()) d.set_driver_version(version_str);
 
-        // HIP returns the PCI BDF as a string like "0000:01:00.0".
-        if (hipDeviceGetPCIBusId) {
-            char bdf[32] = {0};
-            if (ok(hipDeviceGetPCIBusId(bdf, sizeof(bdf), dev))) {
-                d.set_id(std::string("pci-") + bdf);
-            }
-        }
-        if (d.id().empty()) d.set_id("hip-" + std::to_string(i));
+        read_hip_identity(identity_fns, dev, i, d);
 
         // ROCm GPUs all expose FP64; FP16 and INT8 are supported on every GCN
         // generation from Vega onward. We cannot easily distinguish older

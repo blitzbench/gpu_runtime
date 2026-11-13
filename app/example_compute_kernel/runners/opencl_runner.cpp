@@ -2,8 +2,7 @@
 //
 // Pipeline:
 //   1. dlopen the OpenCL ICD loader at setup.backend.path().
-//   2. Enumerate platforms + devices; match by (name, memory) against
-//      setup.device.
+//   2. Find the cl_device_id of setup.device with gpgpu::vendor::find_opencl_device.
 //   3. Create context + in-order command queue.
 //   4. Build the embedded OpenCL C kernel.
 //   5. Allocate three cl_mem buffers; upload a, b; launch; download c.
@@ -13,6 +12,7 @@
 #include "lib_loader.hpp"
 
 #include <CL/cl.h>
+#include <gpgpu/vendor.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -41,9 +41,6 @@ __kernel void vector_add(
 
 constexpr std::size_t kLocalSize = 256;
 
-using PFN_clGetPlatformIDs    = cl_int (CL_API_CALL*)(cl_uint, cl_platform_id*, cl_uint*);
-using PFN_clGetDeviceIDs      = cl_int (CL_API_CALL*)(cl_platform_id, cl_device_type, cl_uint, cl_device_id*, cl_uint*);
-using PFN_clGetDeviceInfo     = cl_int (CL_API_CALL*)(cl_device_id, cl_device_info, std::size_t, void*, std::size_t*);
 using PFN_clCreateContext     = cl_context (CL_API_CALL*)(const cl_context_properties*, cl_uint, const cl_device_id*,
                                                           void (CL_CALLBACK*)(const char*, const void*, std::size_t, void*),
                                                           void*, cl_int*);
@@ -73,9 +70,6 @@ using PFN_clReleaseCommandQueue = cl_int (CL_API_CALL*)(cl_command_queue);
 using PFN_clReleaseContext    = cl_int (CL_API_CALL*)(cl_context);
 
 struct ClApi {
-    PFN_clGetPlatformIDs                   GetPlatformIDs;
-    PFN_clGetDeviceIDs                     GetDeviceIDs;
-    PFN_clGetDeviceInfo                    GetDeviceInfo;
     PFN_clCreateContext                    CreateContext;
     PFN_clCreateCommandQueueWithProperties CreateCommandQueueWithProperties;
     PFN_clCreateBuffer                     CreateBuffer;
@@ -98,9 +92,6 @@ struct ClApi {
 };
 
 bool resolve(const loader::Lib& lib, ClApi& api) {
-    api.GetPlatformIDs                   = lib.sym<PFN_clGetPlatformIDs>("clGetPlatformIDs");
-    api.GetDeviceIDs                     = lib.sym<PFN_clGetDeviceIDs>("clGetDeviceIDs");
-    api.GetDeviceInfo                    = lib.sym<PFN_clGetDeviceInfo>("clGetDeviceInfo");
     api.CreateContext                    = lib.sym<PFN_clCreateContext>("clCreateContext");
     api.CreateCommandQueueWithProperties = lib.sym<PFN_clCreateCommandQueueWithProperties>("clCreateCommandQueueWithProperties");
     api.CreateBuffer                     = lib.sym<PFN_clCreateBuffer>("clCreateBuffer");
@@ -120,8 +111,7 @@ bool resolve(const loader::Lib& lib, ClApi& api) {
     api.ReleaseProgram                   = lib.sym<PFN_clReleaseProgram>("clReleaseProgram");
     api.ReleaseCommandQueue              = lib.sym<PFN_clReleaseCommandQueue>("clReleaseCommandQueue");
     api.ReleaseContext                   = lib.sym<PFN_clReleaseContext>("clReleaseContext");
-    return api.GetPlatformIDs && api.GetDeviceIDs && api.GetDeviceInfo &&
-           api.CreateContext && api.CreateCommandQueueWithProperties &&
+    return api.CreateContext && api.CreateCommandQueueWithProperties &&
            api.CreateBuffer && api.CreateProgramWithSource &&
            api.BuildProgram && api.CreateKernel && api.SetKernelArg &&
            api.EnqueueWriteBuffer && api.EnqueueNDRangeKernel &&
@@ -139,49 +129,6 @@ std::chrono::duration<double> event_span(const ClApi& api, cl_event start, cl_ev
     api.GetEventProfilingInfo(end,   CL_PROFILING_COMMAND_END,   sizeof(t1), &t1, nullptr);
     if (t1 <= t0) return std::chrono::duration<double>{0};
     return std::chrono::duration<double>{(t1 - t0) / 1.0e9};
-}
-
-std::string read_info_string(const ClApi& api, cl_device_id dev, cl_device_info key) {
-    std::size_t n = 0;
-    if (api.GetDeviceInfo(dev, key, 0, nullptr, &n) != CL_SUCCESS || n == 0) return {};
-    std::string s(n, '\0');
-    if (api.GetDeviceInfo(dev, key, n, s.data(), nullptr) != CL_SUCCESS) return {};
-    if (!s.empty() && s.back() == '\0') s.pop_back();
-    return s;
-}
-
-template <typename T>
-T read_info_scalar(const ClApi& api, cl_device_id dev, cl_device_info key) {
-    T v{};
-    api.GetDeviceInfo(dev, key, sizeof(T), &v, nullptr);
-    return v;
-}
-
-// Find the cl_device_id matching the (name, memory) of the gpgpu Device.
-cl_device_id find_matching_device(const ClApi& api, const gpgpu::Device& target) {
-    cl_uint n_platforms = 0;
-    if (api.GetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0) {
-        return nullptr;
-    }
-    std::vector<cl_platform_id> platforms(n_platforms);
-    api.GetPlatformIDs(n_platforms, platforms.data(), nullptr);
-
-    for (cl_platform_id p : platforms) {
-        cl_uint n_devs = 0;
-        if (api.GetDeviceIDs(p, CL_DEVICE_TYPE_ALL, 0, nullptr, &n_devs) != CL_SUCCESS) continue;
-        if (n_devs == 0) continue;
-        std::vector<cl_device_id> devs(n_devs);
-        api.GetDeviceIDs(p, CL_DEVICE_TYPE_ALL, n_devs, devs.data(), nullptr);
-
-        for (cl_device_id d : devs) {
-            const std::string name = read_info_string(api, d, CL_DEVICE_NAME);
-            const cl_ulong   mem   = read_info_scalar<cl_ulong>(api, d, CL_DEVICE_GLOBAL_MEM_SIZE);
-            const bool name_ok = (name == target.name());
-            const bool mem_ok  = (!target.memory().has_value() || mem == *target.memory());
-            if (name_ok && mem_ok) return d;
-        }
-    }
-    return nullptr;
 }
 
 std::string program_build_log(const ClApi& api, cl_program program, cl_device_id dev) {
@@ -213,8 +160,9 @@ RunResult run_vector_add_opencl(const gpgpu::Setup&    setup,
     ClApi api{};
     if (!resolve(lib, api)) { r.error = "ICD entry point resolution failed"; return r; }
 
-    cl_device_id device = find_matching_device(api, setup.device);
-    if (!device) { r.error = "no OpenCL device matched setup.device"; return r; }
+    const gpgpu::vendor::OpenClFns* cl = gpgpu::vendor::opencl();
+    cl_device_id device = cl ? gpgpu::vendor::find_opencl_device(*cl, setup.device) : nullptr;
+    if (!device) { r.error = "no OpenCL device matched " + setup.device.id(); return r; }
 
     r.timings.copy_h2d_size = 2 * bytes;
     r.timings.copy_d2h_size = bytes;

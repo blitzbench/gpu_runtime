@@ -10,19 +10,20 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "../identity.hpp"
 #include "calling_convention.hpp"
+#include "device_identity.hpp"
 
 namespace gpgpu::backends {
 
 namespace {
-
-using CUresult = int;
-using CUdevice = int;
 
 enum CUdevice_attribute : int {
     CU_ATTR_MAX_THREADS_PER_BLOCK   = 1,
@@ -43,12 +44,8 @@ enum CUdevice_attribute : int {
 
 using PFN_cuInit             = CUresult (GPGPU_STDCALL*)(unsigned int);
 using PFN_cuDriverGetVersion = CUresult (GPGPU_STDCALL*)(int*);
-using PFN_cuDeviceGetCount   = CUresult (GPGPU_STDCALL*)(int*);
-using PFN_cuDeviceGet        = CUresult (GPGPU_STDCALL*)(CUdevice*, int);
 using PFN_cuDeviceGetName    = CUresult (GPGPU_STDCALL*)(char*, int, CUdevice);
 using PFN_cuDeviceTotalMem   = CUresult (GPGPU_STDCALL*)(std::size_t*, CUdevice);
-using PFN_cuDeviceGetAttribute = CUresult (GPGPU_STDCALL*)(int*, CUdevice_attribute, CUdevice);
-using PFN_cuDeviceGetUuid    = CUresult (GPGPU_STDCALL*)(unsigned char[16], CUdevice);
 
 // Approximate "CUDA cores" from compute capability and SM count.
 // Table is the well-known one published in the CUDA Programming Guide.
@@ -76,21 +73,6 @@ std::uint32_t cores_per_sm(int major, int minor) {
     return 0;                                       // unknown
 }
 
-std::string format_pci_bdf(int domain, int bus, int dev) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "pci-%04x:%02x:%02x.0", domain, bus, dev);
-    return buf;
-}
-
-std::string format_uuid(const unsigned char u[16]) {
-    char buf[48];
-    std::snprintf(buf, sizeof(buf),
-                  "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
-}
-
 std::string driver_version_string(int v) {
     // CUDA encodes "12.3" as 12030; some old drivers also use 4-digit form.
     int major = v / 1000;
@@ -102,7 +84,50 @@ std::string driver_version_string(int v) {
 
 bool ok(CUresult r) { return r == 0; }
 
+constexpr std::uint16_t kNvidiaPciVendorId = 0x10DE;
+
 } // namespace
+
+void read_cuda_identity(const CudaIdentityFns& fns, CUdevice device, int ordinal, Device& out) {
+    int integrated = 0;
+    if (ok(fns.cuDeviceGetAttribute(&integrated, CU_ATTR_INTEGRATED, device))) {
+        out.set_type(integrated != 0 ? DeviceType::Integrated : DeviceType::Discrete);
+    }
+
+    // The Driver API reports no PCI function number; cuDeviceGetPCIBusId formats function 0 for
+    // every device as well.
+    int domain = 0, bus = 0, slot = 0;
+    if (ok(fns.cuDeviceGetAttribute(&domain, CU_ATTR_PCI_DOMAIN_ID, device)) &&
+        ok(fns.cuDeviceGetAttribute(&bus, CU_ATTR_PCI_BUS_ID, device)) &&
+        ok(fns.cuDeviceGetAttribute(&slot, CU_ATTR_PCI_DEVICE_ID, device))) {
+        out.set_pci_address(PciAddress{static_cast<std::uint32_t>(domain),
+                                       static_cast<std::uint32_t>(bus),
+                                       static_cast<std::uint32_t>(slot), 0});
+        out.set_pci_vendor_id(kNvidiaPciVendorId);
+    }
+
+    if (fns.cuDeviceGetUuid) {
+        std::uint8_t bytes[16] = {0};
+        if (ok(fns.cuDeviceGetUuid(bytes, device))) {
+            if (auto uuid = identity::uuid_from(bytes)) out.set_uuid(*uuid);
+        }
+    }
+
+    identity::assign_id(out, "cuda-" + std::to_string(ordinal));
+}
+
+std::optional<int> find_cuda_ordinal(const CudaIdentityFns& fns, const Device& target) {
+    int count = 0;
+    if (!ok(fns.cuDeviceGetCount(&count))) return std::nullopt;
+    for (int i = 0; i < count; ++i) {
+        CUdevice device = 0;
+        if (!ok(fns.cuDeviceGet(&device, i))) continue;
+        Device candidate;
+        read_cuda_identity(fns, device, i, candidate);
+        if (candidate.id() == target.id()) return i;
+    }
+    return std::nullopt;
+}
 
 ProbeResult probe_cuda() {
     ProbeResult out;
@@ -218,18 +243,9 @@ ProbeResult probe_cuda() {
 
         if (!version_str.empty()) d.set_driver_version(version_str);
 
-        // Stable cross-backend ID: prefer PCI BDF, fall back to UUID.
-        int dom = 0, bus = 0, devid = 0;
-        bool have_dom = ok(cuDeviceGetAttribute(&dom, CU_ATTR_PCI_DOMAIN_ID, dev));
-        bool have_bus = ok(cuDeviceGetAttribute(&bus, CU_ATTR_PCI_BUS_ID, dev));
-        bool have_dev = ok(cuDeviceGetAttribute(&devid, CU_ATTR_PCI_DEVICE_ID, dev));
-        if (have_bus && have_dev) {
-            d.set_id(format_pci_bdf(have_dom ? dom : 0, bus, devid));
-        } else if (cuDeviceGetUuid) {
-            unsigned char uuid[16] = {0};
-            if (ok(cuDeviceGetUuid(uuid, dev))) d.set_id(format_uuid(uuid));
-        }
-        if (d.id().empty()) d.set_id("cuda-" + std::to_string(i));
+        read_cuda_identity(CudaIdentityFns{cuDeviceGetCount, cuDeviceGet, cuDeviceGetAttribute,
+                                           cuDeviceGetUuid},
+                           dev, i, d);
 
         out.devices.push_back(std::move(d));
     }

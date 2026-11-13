@@ -7,11 +7,13 @@
 #include "cuda_runner.hpp"
 
 #include <cuda_runtime.h>
+#include <gpgpu/vendor.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 
 namespace example {
@@ -23,20 +25,6 @@ constexpr unsigned kBlockSize = 256;
 __global__ void vector_add(const float* a, const float* b, float* c, unsigned n) {
     unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
-}
-
-int find_matching_device(const gpgpu::Device& target) {
-    int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess || n == 0) return -1;
-    for (int i = 0; i < n; ++i) {
-        cudaDeviceProp prop{};
-        if (cudaGetDeviceProperties(&prop, i) != cudaSuccess) continue;
-        char bdf[32];
-        std::snprintf(bdf, sizeof(bdf), "pci-%04x:%02x:%02x.0",
-                      prop.pciDomainID, prop.pciBusID, prop.pciDeviceID);
-        if (target.id() == bdf) return i;
-    }
-    return -1;
 }
 
 std::chrono::duration<double> elapsed(cudaEvent_t a, cudaEvent_t b) {
@@ -60,8 +48,9 @@ RunResult run_vector_add_cuda(const gpgpu::Setup&    setup,
     r.timings.copy_h2d_size = 2 * bytes;
     r.timings.copy_d2h_size = bytes;
 
-    const int dev = find_matching_device(setup.device);
-    if (dev < 0) { r.error = "no CUDA device matched " + setup.device.id(); return r; }
+    const std::optional<int> ordinal = gpgpu::vendor::find_cuda_device(setup.device);
+    if (!ordinal) { r.error = "no CUDA device matched " + setup.device.id(); return r; }
+    const int dev = *ordinal;
     if (cudaSetDevice(dev) != cudaSuccess) {
         r.error = "cudaSetDevice failed"; return r;
     }

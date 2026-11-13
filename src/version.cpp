@@ -3,7 +3,7 @@
 namespace gpgpu {
 
 Version version() noexcept {
-    return Version{0, 1, 0};
+    return Version{0, 2, 0};
 }
 
 } // namespace gpgpu

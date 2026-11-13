@@ -1,7 +1,9 @@
 #include "gpgpu/vendor.hpp"
 
 #include <string>
+#include <vector>
 
+#include "backends/device_identity.hpp"
 #include "gpgpu/backend.hpp"
 #include "platform/lib_loader.hpp"
 #include "search_paths.hpp"
@@ -27,7 +29,7 @@ platform::LibHandle* load_library(BackendId backend) noexcept {
     table.member = reinterpret_cast<decltype(table.member)>(resolve(#member));                 \
     if (!table.member) complete = false;
 
-// Resolved but never required: absent on a loader or instance older than Vulkan 1.1.
+// Resolved but never required (see the member's documentation in gpgpu/vendor.hpp).
 #define GPGPU_RESOLVE_OPTIONAL(member)                                                         \
     table.member = reinterpret_cast<decltype(table.member)>(resolve(#member));
 
@@ -35,6 +37,7 @@ template <typename Resolver>
 bool resolve_all(OpenClFns& table, Resolver resolve) noexcept {
     bool complete = true;
     GPGPU_RESOLVE(clGetPlatformIDs)
+    GPGPU_RESOLVE(clGetPlatformInfo)
     GPGPU_RESOLVE(clGetDeviceIDs)
     GPGPU_RESOLVE(clGetDeviceInfo)
     GPGPU_RESOLVE(clCreateContext)
@@ -176,6 +179,7 @@ bool resolve_all(LevelZeroFns& table, Resolver resolve) noexcept {
     GPGPU_RESOLVE(zeKernelDestroy)
     GPGPU_RESOLVE(zeKernelSetGroupSize)
     GPGPU_RESOLVE(zeKernelSetArgumentValue)
+    GPGPU_RESOLVE_OPTIONAL(zeDevicePciGetPropertiesExt)
     return complete;
 }
 
@@ -212,6 +216,38 @@ const LevelZeroFns* load_level_zero() noexcept {
     return complete ? &table : nullptr;
 }
 
+// cuInit is part of loading: every Driver API call after it needs an initialised driver, and
+// calling it again is harmless.
+const backends::CudaIdentityFns* load_cuda() noexcept {
+    const platform::LibHandle* lib = load_library(BackendId::CUDA);
+    if (!lib) return nullptr;
+    using PFN_cuInit = backends::CUresult (GPGPU_STDCALL*)(unsigned int);
+    const auto cuInit = platform::resolve_as<PFN_cuInit>(*lib, "cuInit");
+    static backends::CudaIdentityFns table{};
+    table.cuDeviceGetCount = platform::resolve_as<backends::PFN_cuDeviceGetCount>(*lib, "cuDeviceGetCount");
+    table.cuDeviceGet = platform::resolve_as<backends::PFN_cuDeviceGet>(*lib, "cuDeviceGet");
+    table.cuDeviceGetAttribute =
+        platform::resolve_as<backends::PFN_cuDeviceGetAttribute>(*lib, "cuDeviceGetAttribute");
+    table.cuDeviceGetUuid = platform::resolve_as<backends::PFN_cuDeviceGetUuid>(*lib, "cuDeviceGetUuid");
+    if (!cuInit || !table.cuDeviceGetCount || !table.cuDeviceGet || !table.cuDeviceGetAttribute) {
+        return nullptr;
+    }
+    if (cuInit(0) != 0) return nullptr;
+    return &table;
+}
+
+const backends::HipIdentityFns* load_hip() noexcept {
+    const platform::LibHandle* lib = load_library(BackendId::ROCm);
+    if (!lib) return nullptr;
+    static backends::HipIdentityFns table{};
+    table.hipGetDeviceCount = platform::resolve_as<backends::PFN_hipGetDeviceCount>(*lib, "hipGetDeviceCount");
+    table.hipDeviceGet = platform::resolve_as<backends::PFN_hipDeviceGet>(*lib, "hipDeviceGet");
+    table.hipDeviceGetPCIBusId =
+        platform::resolve_as<backends::PFN_hipDeviceGetPCIBusId>(*lib, "hipDeviceGetPCIBusId");
+    table.hipDeviceGetUuid = platform::resolve_as<backends::PFN_hipDeviceGetUuid>(*lib, "hipDeviceGetUuid");
+    return table.hipGetDeviceCount ? &table : nullptr;
+}
+
 } // namespace
 
 const OpenClFns* opencl() noexcept {
@@ -227,6 +263,118 @@ const VulkanFns* vulkan() noexcept {
 const LevelZeroFns* level_zero() noexcept {
     static const LevelZeroFns* const table = load_level_zero();
     return table;
+}
+
+VkPhysicalDevice find_vulkan_device(const VulkanInstanceFns& fns, VkInstance instance,
+                                    const Device& target) noexcept {
+    try {
+        std::uint32_t count = 0;
+        if (fns.vkEnumeratePhysicalDevices(instance, &count, nullptr) != VK_SUCCESS || count == 0) {
+            return VK_NULL_HANDLE;
+        }
+        std::vector<VkPhysicalDevice> devices(count);
+        if (fns.vkEnumeratePhysicalDevices(instance, &count, devices.data()) < VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        devices.resize(count);
+        const backends::VulkanIdentityFns identity_fns{fns.vkGetPhysicalDeviceProperties,
+                                                       fns.vkGetPhysicalDeviceProperties2,
+                                                       fns.vkEnumerateDeviceExtensionProperties};
+        for (VkPhysicalDevice pd : devices) {
+            Device candidate;
+            backends::read_vulkan_identity(identity_fns, pd, candidate);
+            if (candidate.id() == target.id()) return pd;
+        }
+    } catch (...) {
+        return VK_NULL_HANDLE;
+    }
+    return VK_NULL_HANDLE;
+}
+
+bool find_level_zero_device(const LevelZeroFns& fns, const Device& target,
+                            ze_driver_handle_t& driver, ze_device_handle_t& device) noexcept {
+    try {
+        std::uint32_t n_drivers = 0;
+        if (fns.zeDriverGet(&n_drivers, nullptr) != ZE_RESULT_SUCCESS || n_drivers == 0) return false;
+        std::vector<ze_driver_handle_t> drivers(n_drivers);
+        if (fns.zeDriverGet(&n_drivers, drivers.data()) != ZE_RESULT_SUCCESS) return false;
+        std::uint32_t ordinal = 0;
+        for (ze_driver_handle_t drv : drivers) {
+            std::uint32_t n_devices = 0;
+            if (fns.zeDeviceGet(drv, &n_devices, nullptr) != ZE_RESULT_SUCCESS || n_devices == 0) continue;
+            std::vector<ze_device_handle_t> devices(n_devices);
+            if (fns.zeDeviceGet(drv, &n_devices, devices.data()) != ZE_RESULT_SUCCESS) continue;
+            for (ze_device_handle_t dev : devices) {
+                const std::uint32_t device_ordinal = ordinal++;
+                ze_device_properties_t props{};
+                props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
+                if (fns.zeDeviceGetProperties(dev, &props) != ZE_RESULT_SUCCESS) continue;
+                Device candidate;
+                backends::read_level_zero_identity(fns.zeDevicePciGetPropertiesExt, dev, props,
+                                                   device_ordinal, candidate);
+                if (candidate.id() == target.id()) {
+                    driver = drv;
+                    device = dev;
+                    return true;
+                }
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
+
+cl_device_id find_opencl_device(const OpenClFns& fns, const Device& target) noexcept {
+    try {
+        cl_uint n_platforms = 0;
+        if (fns.clGetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0) {
+            return nullptr;
+        }
+        std::vector<cl_platform_id> platforms(n_platforms);
+        if (fns.clGetPlatformIDs(n_platforms, platforms.data(), nullptr) != CL_SUCCESS) return nullptr;
+        for (cl_platform_id platform : platforms) {
+            if (backends::is_skipped_opencl_platform(fns.clGetPlatformInfo, platform)) continue;
+            cl_uint n_devices = 0;
+            if (fns.clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 0, nullptr, &n_devices) != CL_SUCCESS ||
+                n_devices == 0) {
+                continue;
+            }
+            std::vector<cl_device_id> devices(n_devices);
+            if (fns.clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, n_devices, devices.data(), nullptr) !=
+                CL_SUCCESS) {
+                continue;
+            }
+            for (cl_device_id dev : devices) {
+                Device candidate;
+                backends::read_opencl_identity(fns.clGetDeviceInfo, dev, candidate);
+                if (candidate.id() == target.id()) return dev;
+            }
+        }
+    } catch (...) {
+        return nullptr;
+    }
+    return nullptr;
+}
+
+std::optional<int> find_cuda_device(const Device& target) noexcept {
+    try {
+        static const backends::CudaIdentityFns* const table = load_cuda();
+        if (!table) return std::nullopt;
+        return backends::find_cuda_ordinal(*table, target);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<int> find_hip_device(const Device& target) noexcept {
+    try {
+        static const backends::HipIdentityFns* const table = load_hip();
+        if (!table) return std::nullopt;
+        return backends::find_hip_ordinal(*table, target);
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 bool load_instance_fns(const VulkanFns& global, VkInstance instance, VulkanInstanceFns& out) noexcept {

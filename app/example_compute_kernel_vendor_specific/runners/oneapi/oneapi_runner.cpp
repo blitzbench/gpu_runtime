@@ -29,47 +29,6 @@ using LevelZeroFns = gpgpu::vendor::LevelZeroFns;
 
 constexpr std::uint32_t kGroupSize = 256;
 
-std::string format_uuid(const std::uint8_t u[ZE_MAX_DEVICE_UUID_SIZE]) {
-    char buf[40];
-    std::snprintf(buf, sizeof(buf),
-                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
-}
-
-bool find_matching_device(const LevelZeroFns&  ze,
-                          const gpgpu::Device& target,
-                          ze_driver_handle_t&  out_driver,
-                          ze_device_handle_t&  out_device) {
-    std::uint32_t n_drv = 0;
-    ze.zeDriverGet(&n_drv, nullptr);
-    if (n_drv == 0) return false;
-    std::vector<ze_driver_handle_t> drivers(n_drv);
-    ze.zeDriverGet(&n_drv, drivers.data());
-    for (auto drv : drivers) {
-        std::uint32_t n_dev = 0;
-        ze.zeDeviceGet(drv, &n_dev, nullptr);
-        if (n_dev == 0) continue;
-        std::vector<ze_device_handle_t> devs(n_dev);
-        ze.zeDeviceGet(drv, &n_dev, devs.data());
-        for (auto d : devs) {
-            ze_device_properties_t p{};
-            p.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
-            if (ze.zeDeviceGetProperties(d, &p) != ZE_RESULT_SUCCESS) continue;
-            char id[80];
-            std::snprintf(id, sizeof(id), "ze-%04x:%04x-%s", p.vendorId, p.deviceId,
-                          format_uuid(p.uuid.id).c_str());
-            if (target.id() == id) {
-                out_driver = drv;
-                out_device = d;
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 } // namespace
 
 RunResult run_vector_add_oneapi(const gpgpu::Setup&    setup,
@@ -97,7 +56,7 @@ RunResult run_vector_add_oneapi(const gpgpu::Setup&    setup,
 
     ze_driver_handle_t drv = nullptr;
     ze_device_handle_t dev = nullptr;
-    if (!find_matching_device(ze, setup.device, drv, dev)) {
+    if (!gpgpu::vendor::find_level_zero_device(ze, setup.device, drv, dev)) {
         r.error = "no Level Zero device matched " + setup.device.id(); return r;
     }
 

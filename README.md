@@ -15,6 +15,47 @@ cmake --build build
 ./build/app/gpu_runtime_query/gpu_runtime_query
 ```
 
+The unit tests (GoogleTest, fetched when not installed) build by default when
+gpu_runtime is the top-level project; set `-DGPGPU_BUILD_TESTS=OFF` to skip
+them. They need the default static build.
+
+```bash
+ctest --test-dir build
+```
+
+## Device identity
+
+`gpgpu::Runtime::query()` returns one `Setup` per (device, backend) pair.
+`Device::id()` identifies the physical device, by the same rule on every
+backend:
+
+1. `pci-DDDD:BB:DD.F` when the backend reports the PCI bus address
+   (CUDA attributes, `hipDeviceGetPCIBusId`, `cl_khr_pci_bus_info` or the
+   NVIDIA / AMD OpenCL extensions, `VK_EXT_pci_bus_info`,
+   `zeDevicePciGetPropertiesExt`);
+2. otherwise `uuid-<8-4-4-4-12>` when it reports a device UUID;
+3. otherwise a backend-specific id (`cuda-<n>`, `hip-<n>`, `ze-VVVV:DDDD-<n>`,
+   `ocl-VVVV-<handle>`, `vk-VVVV:DDDD-<pipelineCacheUUID>`, `metal-<registryID>`).
+
+A GPU seen by several backends therefore has one id, so `Report::devices()`
+lists it once and `Report::preferred()` returns one setup for it: the
+vendor-native backend (`Native`), else OpenCL, else Vulkan (`Fallback`).
+Only the PCI address is comparable across backends; UUIDs and backend ids are
+not, so a device without a PCI address may appear once per backend.
+
+The identity is also available typed:
+
+| Accessor | Meaning |
+|---|---|
+| `pci_address()` | `std::optional<PciAddress>` (domain, bus, device, function); `to_string()` gives `DDDD:BB:DD.F` |
+| `pci_vendor_id()`, `pci_device_id()` | `std::optional<std::uint16_t>`; absent for non-PCI devices or when the API does not report them (CUDA, ROCm and OpenCL give no device id) |
+| `uuid()` | `std::optional<DeviceUuid>`; only stable within one backend |
+| `type()` | `DeviceType::Discrete`, `Integrated`, `Virtual`, `Cpu` or `Unknown` |
+
+`DeviceType::Cpu` marks software implementations such as Mesa's llvmpipe or
+pocl. They stay in the report and in `preferred()`; filter on `type()` to skip
+them.
+
 ## Calling the vendor runtimes yourself
 
 `include/gpgpu/vendor.hpp` exposes the same run-time binding the probes use, so
@@ -27,6 +68,14 @@ Vulkan instance- and device-level tables are filled with `load_instance_fns` /
 Level Zero headers are on the library's public include path for the types, and
 `VK_NO_PROTOTYPES` is defined publicly so a stray direct `vk*` call fails to
 compile.
+
+To run on a `Setup` from the report, find the backend's native handle with the
+lookup helpers in the same header instead of rebuilding an id string:
+`find_vulkan_device`, `find_level_zero_device`, `find_opencl_device`,
+`find_cuda_device` / `find_hip_device` (device ordinals) and, from
+Objective-C++, `find_metal_device`. Each derives every native device's id with
+the probe's own code and returns the one equal to `Device::id()`. The Vulkan
+lookup needs an instance created with `apiVersion` 1.1 or later.
 
 ## Third-party headers
 

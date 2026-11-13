@@ -31,32 +31,6 @@ using VulkanDeviceFns   = gpgpu::vendor::VulkanDeviceFns;
 
 constexpr std::uint32_t kLocalSize = 256;
 
-std::string format_id(const VkPhysicalDeviceProperties& p) {
-    const auto& u = p.pipelineCacheUUID;
-    char buf[80];
-    std::snprintf(buf, sizeof(buf),
-                  "vk-%04x:%04x-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  p.vendorID, p.deviceID,
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                  u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-    return buf;
-}
-
-VkPhysicalDevice find_matching_device(const VulkanInstanceFns& vki, VkInstance inst,
-                                      const gpgpu::Device& target) {
-    std::uint32_t n = 0;
-    vki.vkEnumeratePhysicalDevices(inst, &n, nullptr);
-    if (n == 0) return VK_NULL_HANDLE;
-    std::vector<VkPhysicalDevice> phys(n);
-    vki.vkEnumeratePhysicalDevices(inst, &n, phys.data());
-    for (auto pd : phys) {
-        VkPhysicalDeviceProperties props{};
-        vki.vkGetPhysicalDeviceProperties(pd, &props);
-        if (format_id(props) == target.id()) return pd;
-    }
-    return VK_NULL_HANDLE;
-}
-
 std::uint32_t find_compute_queue_family(const VulkanInstanceFns& vki, VkPhysicalDevice pd) {
     std::uint32_t n = 0;
     vki.vkGetPhysicalDeviceQueueFamilyProperties(pd, &n, nullptr);
@@ -146,7 +120,7 @@ RunResult run_vector_add_vulkan(const gpgpu::Setup&    setup,
         r.error = "Vulkan instance entry points unavailable"; return r;
     }
 
-    VkPhysicalDevice pd = find_matching_device(vki, inst, setup.device);
+    VkPhysicalDevice pd = gpgpu::vendor::find_vulkan_device(vki, inst, setup.device);
     if (!pd) {
         vki.vkDestroyInstance(inst, nullptr); r.error = "no Vulkan device matched " + setup.device.id(); return r;
     }
