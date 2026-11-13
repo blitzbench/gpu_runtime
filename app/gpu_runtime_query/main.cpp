@@ -93,9 +93,8 @@ int main() {
                     fmt_opt(dev.subgroup_size()).c_str(),
                     fmt_opt(dev.max_workgroup_size()).c_str(),
                     fmt_opt(dev.shared_memory_per_block()).c_str());
-        std::printf("      clock=%s MHz  integrated=%s  driver=%s\n",
+        std::printf("      clock=%s MHz  driver=%s\n",
                     fmt_opt(dev.frequency()).c_str(),
-                    dev.integrated() ? yn(*dev.integrated()).c_str() : "n/a",
                     fmt_opt_str(dev.driver_version()).c_str());
         std::printf("      fp16=%s fp64=%s int8=%s tensor_cores=%s\n",
                     yn(dev.supports_fp16()).c_str(),

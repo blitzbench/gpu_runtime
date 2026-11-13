@@ -160,7 +160,6 @@ ProbeResult probe_oneapi() {
             d.set_vendor_string(std::string(to_string(v)));
 
             if (props.coreClockRate > 0) d.set_frequency(props.coreClockRate);
-            d.set_integrated((props.flags & ZE_DEVICE_PROPERTY_FLAG_INTEGRATED) != 0);
 
             if (zeDeviceGetCompute) {
                 ze_device_compute_properties_t cp{};

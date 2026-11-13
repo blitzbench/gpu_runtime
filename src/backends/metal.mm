@@ -10,6 +10,10 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#if __has_feature(objc_arc)
+#error "metal.mm manages Objective-C references manually and must be compiled without ARC"
+#endif
+
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -62,6 +66,7 @@ ProbeResult probe_metal() {
         out.backend = Backend(BackendId::Metal, /*version*/ {},
                               "/System/Library/Frameworks/Metal.framework/Metal",
                               BackendStatus::NoDevices, std::nullopt);
+        [devs release];
         return out;
     }
 
@@ -80,9 +85,6 @@ ProbeResult probe_metal() {
         if ([dev respondsToSelector:@selector(recommendedMaxWorkingSetSize)]) {
             std::uint64_t mem = (std::uint64_t)[dev recommendedMaxWorkingSetSize];
             if (mem > 0) d.set_memory(mem);
-        }
-        if ([dev respondsToSelector:@selector(hasUnifiedMemory)]) {
-            d.set_integrated([dev hasUnifiedMemory] ? true : false);
         }
         if ([dev respondsToSelector:@selector(maxThreadsPerThreadgroup)]) {
             MTLSize tg = [dev maxThreadsPerThreadgroup];
@@ -104,6 +106,7 @@ ProbeResult probe_metal() {
 
         out.devices.push_back(std::move(d));
     }
+    [devs release];
 
     out.backend = Backend(BackendId::Metal, std::string(version_buf),
                           "/System/Library/Frameworks/Metal.framework/Metal",
@@ -117,13 +120,18 @@ namespace gpgpu::vendor {
 
 id<MTLDevice> find_metal_device(const Device& target) noexcept {
     NSArray<id<MTLDevice>>* devs = MTLCopyAllDevices();
+    id<MTLDevice> found = nil;
     std::size_t index = 0;
     for (id<MTLDevice> dev in devs) {
         Device candidate;
         backends::read_metal_identity(dev, index++, candidate);
-        if (candidate.id() == target.id()) return dev;
+        if (candidate.id() == target.id()) {
+            found = [[dev retain] autorelease];
+            break;
+        }
     }
-    return nil;
+    [devs release];
+    return found;
 }
 
 } // namespace gpgpu::vendor

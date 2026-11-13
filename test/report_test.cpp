@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -149,6 +151,75 @@ TEST(AssembleReport, NativePicksPrecedeFallbackPicks) {
     EXPECT_EQ(preferred[0].backend.id(), BackendId::CUDA);
     EXPECT_EQ(preferred[1].backend.id(), BackendId::OpenCL);
     EXPECT_EQ(preferred[2].backend.id(), BackendId::Vulkan);
+}
+
+TEST(AssembleReport, DuplicateOnOneBackendIsOtherAfterTheFirst) {
+    std::vector<ProbeResult> probes;
+    Device second = iris();
+    second.set_name("Iris Xe (second platform)");
+    probes.push_back(probe(BackendId::OpenCL, {iris(), second}));
+    probes.push_back(probe(BackendId::Vulkan, {iris()}));
+    const auto report = gpgpu::backends::assemble_report(std::move(probes));
+
+    EXPECT_EQ(report.devices().size(), 1u);
+    const auto opencl = report.by_backend(BackendId::OpenCL);
+    ASSERT_EQ(opencl.size(), 2u);
+    EXPECT_EQ(opencl[0].preferred, Preference::Fallback);
+    EXPECT_EQ(opencl[1].preferred, Preference::Other);
+    EXPECT_EQ(report.by_backend(BackendId::Vulkan)[0].preferred, Preference::Other);
+
+    const auto preferred = report.preferred();
+    ASSERT_EQ(preferred.size(), 1u);
+    EXPECT_EQ(preferred[0].device.name(), "Iris Xe");
+}
+
+TEST(AssembleReport, DuplicateOfNativeBackendIsOtherAfterTheFirst) {
+    std::vector<ProbeResult> probes;
+    probes.push_back(probe(BackendId::CUDA, {rtx(), rtx()}));
+    const auto report = gpgpu::backends::assemble_report(std::move(probes));
+    ASSERT_EQ(report.size(), 2u);
+    EXPECT_EQ(report[0].preferred, Preference::Native);
+    EXPECT_EQ(report[1].preferred, Preference::Other);
+}
+
+TEST(AssembleReport, MergesIdentityFieldsAcrossBackends) {
+    Device cuda = rtx();
+    cuda.set_pci_vendor_id(0x10de);
+    Device vulkan;
+    vulkan.set_vendor(Vendor::Nvidia).set_pci_address(kNvidia).set_pci_vendor_id(0x10de).set_pci_device_id(0x2820);
+    vulkan.set_uuid(*gpgpu::identity::uuid_from(kOtherUuid));
+    gpgpu::identity::assign_id(vulkan, "unused");
+    Device opencl = rtx();
+    opencl.set_type(DeviceType::Unknown);
+    opencl.set_uuid(*gpgpu::identity::uuid_from(kLlvmpipeUuid));
+
+    std::vector<ProbeResult> probes;
+    probes.push_back(probe(BackendId::CUDA, {cuda}));
+    probes.push_back(probe(BackendId::OpenCL, {opencl}));
+    probes.push_back(probe(BackendId::Vulkan, {vulkan}));
+    const auto report = gpgpu::backends::assemble_report(std::move(probes));
+
+    ASSERT_EQ(report.size(), 3u);
+    for (const gpgpu::Setup& s : report) {
+        EXPECT_EQ(s.device.pci_vendor_id(), std::optional<std::uint16_t>(0x10de));
+        EXPECT_EQ(s.device.pci_device_id(), std::optional<std::uint16_t>(0x2820));
+        EXPECT_EQ(s.device.type(), DeviceType::Discrete);
+        ASSERT_TRUE(s.device.uuid().has_value());
+    }
+    // A UUID a backend reports itself is kept; one it lacks comes from the first that has one.
+    EXPECT_EQ(*report[0].device.uuid(), *gpgpu::identity::uuid_from(kLlvmpipeUuid));
+    EXPECT_EQ(*report[1].device.uuid(), *gpgpu::identity::uuid_from(kLlvmpipeUuid));
+    EXPECT_EQ(*report[2].device.uuid(), *gpgpu::identity::uuid_from(kOtherUuid));
+}
+
+TEST(AssembleReport, DoesNotMergeAcrossDifferentIds) {
+    Device vulkan = iris();
+    vulkan.set_pci_device_id(0xa7a0);
+    std::vector<ProbeResult> probes;
+    probes.push_back(probe(BackendId::CUDA, {rtx()}));
+    probes.push_back(probe(BackendId::Vulkan, {vulkan}));
+    const auto report = gpgpu::backends::assemble_report(std::move(probes));
+    EXPECT_FALSE(report[0].device.pci_device_id().has_value());
 }
 
 TEST(AssembleReport, KeepsEveryBackendIncludingEmptyOnes) {

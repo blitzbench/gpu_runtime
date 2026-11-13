@@ -208,7 +208,6 @@ ProbeResult probe_vulkan() {
         d.set_vendor(v);
         d.set_vendor_string(std::string(to_string(v)));
         d.set_driver_version(format_api_version(props.driverVersion));
-        d.set_integrated(props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
 
         if (vkGetPhysicalDeviceMemoryProperties) {
             VkPhysicalDeviceMemoryProperties mp{};

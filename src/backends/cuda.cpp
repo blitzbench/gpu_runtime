@@ -231,10 +231,6 @@ ProbeResult probe_cuda() {
             if (gbps > 0) d.set_memory_bandwidth_gbps(gbps);
         }
 
-        int integrated = 0;
-        if (ok(cuDeviceGetAttribute(&integrated, CU_ATTR_INTEGRATED, dev)))
-            d.set_integrated(integrated != 0);
-
         // Feature flags from compute capability.
         if (cc_major >= 6) d.set_fp16(true);   // sm_60+ has native FP16
         if (cc_major >= 1) d.set_fp64(true);   // CUDA always exposes FP64 (slow on consumer)

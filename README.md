@@ -52,9 +52,32 @@ The identity is also available typed:
 | `uuid()` | `std::optional<DeviceUuid>`; only stable within one backend |
 | `type()` | `DeviceType::Discrete`, `Integrated`, `Virtual`, `Cpu` or `Unknown` |
 
-`DeviceType::Cpu` marks software implementations such as Mesa's llvmpipe or
-pocl. They stay in the report and in `preferred()`; filter on `type()` to skip
-them.
+`type()` is the only integrated-vs-discrete flag. `DeviceType::Cpu` marks
+software implementations such as Mesa's llvmpipe or pocl. They stay in the
+report and in `preferred()`; filter on `type()` to skip them.
+
+Within a report, an identity field one backend cannot report is filled from
+another backend's `Device` with the same id (the first that reports it, in
+probe order): an NVIDIA GPU's CUDA setup carries the PCI device id its Vulkan
+setup reports. A UUID is only filled where the
+backend reports none, since UUIDs differ between backends.
+
+A backend can expose one physical device twice, for example two OpenCL
+platforms or two Vulkan drivers (RADV and AMDVLK) for the same GPU. Both
+setups share the id. Only the first, in enumeration order, can be `Native` or
+`Fallback`; the later ones are `Other`, because the lookups below always
+resolve the first device with that identity on that backend.
+
+### Limits
+
+- OpenCL drivers that predate `CL_DEVICE_PCI_DOMAIN_ID_NV` (NVIDIA) and AMD's
+  `cl_amd_device_topology`, which has no domain field, report no PCI domain;
+  domain 0 is assumed for them. On a host with more than one PCI segment this
+  can give two GPUs the same id and merge them.
+- CUDA reports no PCI function number (it is 0); CUDA, ROCm and OpenCL report
+  no PCI device id; ROCm reports no device type. Other backends of the same
+  device fill these in, as described above.
+- The Vulkan lookup needs an instance created with `apiVersion` 1.1 or later.
 
 ## Calling the vendor runtimes yourself
 
@@ -73,9 +96,10 @@ To run on a `Setup` from the report, find the backend's native handle with the
 lookup helpers in the same header instead of rebuilding an id string:
 `find_vulkan_device`, `find_level_zero_device`, `find_opencl_device`,
 `find_cuda_device` / `find_hip_device` (device ordinals) and, from
-Objective-C++, `find_metal_device`. Each derives every native device's id with
-the probe's own code and returns the one equal to `Device::id()`. The Vulkan
-lookup needs an instance created with `apiVersion` 1.1 or later.
+Objective-C++, `find_metal_device` (returned autoreleased). Each derives every
+native device's id with the probe's own code and returns the first device on
+that backend whose id equals `Device::id()`. The Vulkan lookup needs an
+instance created with `apiVersion` 1.1 or later.
 
 ## Third-party headers
 

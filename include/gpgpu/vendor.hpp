@@ -196,13 +196,15 @@ bool load_instance_fns(const VulkanFns& global, VkInstance instance, VulkanInsta
 bool load_device_fns(const VulkanInstanceFns& instance_fns, VkDevice device, VulkanDeviceFns& out) noexcept;
 
 // Native-handle lookups. Each one enumerates the backend's devices, derives every device's id with
-// the code the probe uses, and returns the one whose id equals target.id(). A consumer never
-// rebuilds an id itself. When a backend exposes one physical device twice (two OpenCL platforms or
-// two Vulkan drivers for the same GPU), the first in enumeration order is returned, which is the
-// one Report::preferred() picks.
+// the code the probe uses, and returns the first device whose id equals target.id(). A consumer
+// never rebuilds an id itself. When a backend exposes one physical device twice (two OpenCL
+// platforms or two Vulkan drivers for the same GPU), the lookup always resolves the first in
+// enumeration order; Runtime::query() marks every later duplicate Preference::Other, because a
+// Setup for it would run on the first one's handle.
 
 // `instance` must have been created with apiVersion 1.1 or later: below that the PCI address and
-// UUID are unreadable and a device query() identified by them is not found.
+// UUID are unreadable, every device gets its backend-specific id, and a device query() identified
+// by PCI address or UUID is not found.
 VkPhysicalDevice find_vulkan_device(const VulkanInstanceFns& fns, VkInstance instance,
                                     const Device& target) noexcept;
 
@@ -223,7 +225,9 @@ std::optional<int> find_cuda_device(const Device& target) noexcept;
 std::optional<int> find_hip_device(const Device& target) noexcept;
 
 #if defined(__APPLE__) && defined(__OBJC__)
-// Returns nil when no device matches.
+// Returns nil when no device matches. The device is returned autoreleased (+0), following the Cocoa
+// convention for a function that is not a copy / new: call it inside an autorelease pool, and retain
+// the device (a strong reference under ARC) to keep it beyond that pool.
 id<MTLDevice> find_metal_device(const Device& target) noexcept;
 #endif
 

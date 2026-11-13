@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,8 @@ struct FakeVkDevice {
 };
 
 std::vector<FakeVkDevice> g_vk_devices;
+VkResult g_vk_enumerate_result = VK_SUCCESS;
+bool g_vk_pci_chained_without_extension = false;
 
 const FakeVkDevice& vk_fake(VkPhysicalDevice pd) {
     return *reinterpret_cast<const FakeVkDevice*>(pd);
@@ -41,6 +44,7 @@ VkPhysicalDevice vk_handle(std::size_t i) {
 
 VKAPI_ATTR VkResult VKAPI_CALL fake_vkEnumeratePhysicalDevices(VkInstance, std::uint32_t* count,
                                                                VkPhysicalDevice* out) {
+    if (g_vk_enumerate_result != VK_SUCCESS) return g_vk_enumerate_result;
     if (!out) {
         *count = static_cast<std::uint32_t>(g_vk_devices.size());
         return VK_SUCCESS;
@@ -63,6 +67,7 @@ VKAPI_ATTR void VKAPI_CALL fake_vkGetPhysicalDeviceProperties2(VkPhysicalDevice 
             std::memcpy(reinterpret_cast<VkPhysicalDeviceIDProperties*>(next)->deviceUUID, d.uuid,
                         VK_UUID_SIZE);
         } else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT) {
+            if (!d.has_pci_ext) g_vk_pci_chained_without_extension = true;
             auto* pci = reinterpret_cast<VkPhysicalDevicePCIBusInfoPropertiesEXT*>(next);
             pci->pciDomain = d.pci.pciDomain;
             pci->pciBus = d.pci.pciBus;
@@ -124,6 +129,8 @@ Device read_vk(const gpgpu::vendor::VulkanInstanceFns& fns, std::size_t i) {
 class VulkanLookup : public ::testing::Test {
 protected:
     void SetUp() override {
+        g_vk_enumerate_result = VK_SUCCESS;
+        g_vk_pci_chained_without_extension = false;
         g_vk_devices = {
             vk_device(0x8086, 0xa7a0, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, VK_API_VERSION_1_3, true,
                       PciAddress{0, 0, 2, 0}, 0x10),
@@ -151,6 +158,32 @@ TEST_F(VulkanLookup, CpuRendererIsFlaggedAndKeyedByUuid) {
     EXPECT_FALSE(d.pci_address().has_value());
     EXPECT_FALSE(d.pci_vendor_id().has_value());
     EXPECT_EQ(d.id(), "uuid-30313233-3435-3637-3839-3a3b3c3d3e3f");
+}
+
+TEST_F(VulkanLookup, PciBusInfoIsNotChainedWithoutTheExtension) {
+    const Device d = read_vk(vk_fns(true), 2);
+    EXPECT_FALSE(g_vk_pci_chained_without_extension);
+    EXPECT_FALSE(d.pci_address().has_value());
+}
+
+TEST_F(VulkanLookup, EnumerationFailureFindsNothing) {
+    const Device target = read_vk(vk_fns(true), 1);
+    g_vk_enumerate_result = VK_ERROR_INITIALIZATION_FAILED;
+    EXPECT_EQ(gpgpu::vendor::find_vulkan_device(vk_fns(true), VK_NULL_HANDLE, target), VK_NULL_HANDLE);
+}
+
+TEST_F(VulkanLookup, NoDevicesFindsNothing) {
+    const Device target = read_vk(vk_fns(true), 1);
+    g_vk_devices.clear();
+    EXPECT_EQ(gpgpu::vendor::find_vulkan_device(vk_fns(true), VK_NULL_HANDLE, target), VK_NULL_HANDLE);
+}
+
+TEST_F(VulkanLookup, SameGpuOnTwoDriversResolvesTheFirst) {
+    g_vk_devices.push_back(g_vk_devices[1]);
+    g_vk_devices.back().props.driverVersion = 2;
+    const auto fns = vk_fns(true);
+    ASSERT_EQ(read_vk(fns, 3).id(), read_vk(fns, 1).id());
+    EXPECT_EQ(gpgpu::vendor::find_vulkan_device(fns, VK_NULL_HANDLE, read_vk(fns, 3)), vk_handle(1));
 }
 
 TEST_F(VulkanLookup, WithoutProperties2FallsBackToBackendId) {
@@ -197,12 +230,14 @@ struct FakeZeDevice {
 
 std::vector<FakeZeDevice> g_ze_devices;
 int g_ze_driver_tag = 0;
+ze_result_t g_ze_driver_result = ZE_RESULT_SUCCESS;
 
 ze_device_handle_t ze_handle(std::size_t i) {
     return reinterpret_cast<ze_device_handle_t>(&g_ze_devices[i]);
 }
 
 ze_result_t ZE_APICALL fake_zeDriverGet(std::uint32_t* count, ze_driver_handle_t* out) {
+    if (g_ze_driver_result != ZE_RESULT_SUCCESS) return g_ze_driver_result;
     if (!out) {
         *count = 1;
         return ZE_RESULT_SUCCESS;
@@ -267,6 +302,7 @@ Device read_ze(const gpgpu::vendor::LevelZeroFns& fns, std::size_t i) {
 class LevelZeroLookup : public ::testing::Test {
 protected:
     void SetUp() override {
+        g_ze_driver_result = ZE_RESULT_SUCCESS;
         g_ze_devices = {
             ze_device(0xa7a0, ZE_DEVICE_TYPE_GPU, true, true, PciAddress{0, 0, 2, 0}, 0x80),
             ze_device(0x56a0, ZE_DEVICE_TYPE_GPU, false, false, PciAddress{}, 0x40),
@@ -306,6 +342,23 @@ TEST_F(LevelZeroLookup, FindsEveryDeviceByProbeId) {
     }
 }
 
+TEST_F(LevelZeroLookup, DriverEnumerationFailureFindsNothing) {
+    const Device target = read_ze(ze_fns(true), 0);
+    g_ze_driver_result = ZE_RESULT_ERROR_UNINITIALIZED;
+    ze_driver_handle_t driver = nullptr;
+    ze_device_handle_t device = nullptr;
+    EXPECT_FALSE(gpgpu::vendor::find_level_zero_device(ze_fns(true), target, driver, device));
+    EXPECT_EQ(device, nullptr);
+}
+
+TEST_F(LevelZeroLookup, NoDevicesFindsNothing) {
+    const Device target = read_ze(ze_fns(true), 0);
+    g_ze_devices.clear();
+    ze_driver_handle_t driver = nullptr;
+    ze_device_handle_t device = nullptr;
+    EXPECT_FALSE(gpgpu::vendor::find_level_zero_device(ze_fns(true), target, driver, device));
+}
+
 TEST_F(LevelZeroLookup, UnknownDeviceLeavesOutputsUntouched) {
     Device other;
     other.set_id("pci-0000:05:00.0");
@@ -318,6 +371,20 @@ TEST_F(LevelZeroLookup, UnknownDeviceLeavesOutputsUntouched) {
 
 // --- OpenCL ----------------------------------------------------------------------------------
 
+// The PCIe layout of cl_device_topology_amd, as AMD's drivers write it.
+struct AmdTopology {
+    cl_uint type;
+    char unused[17];
+    char bus;
+    char device;
+    char function;
+};
+
+constexpr cl_device_info kNvBusId    = 0x4008;
+constexpr cl_device_info kNvSlotId   = 0x4009;
+constexpr cl_device_info kNvDomainId = 0x400A;
+constexpr cl_device_info kAmdTopology = 0x4037;
+
 struct FakeClDevice {
     cl_device_type type;
     cl_bool unified;
@@ -325,6 +392,10 @@ struct FakeClDevice {
     std::string extensions;
     cl_device_pci_bus_info_khr pci;
     std::uint8_t uuid[CL_UUID_SIZE_KHR];
+    cl_uint nv_bus;
+    cl_uint nv_slot;
+    std::optional<cl_uint> nv_domain;
+    AmdTopology amd;
 };
 
 struct FakeClPlatform {
@@ -333,8 +404,10 @@ struct FakeClPlatform {
 };
 
 std::vector<FakeClPlatform> g_cl_platforms;
+cl_int g_cl_platform_result = CL_SUCCESS;
 
 cl_int CL_API_CALL fake_clGetPlatformIDs(cl_uint n, cl_platform_id* out, cl_uint* count) {
+    if (g_cl_platform_result != CL_SUCCESS) return g_cl_platform_result;
     if (count) *count = static_cast<cl_uint>(g_cl_platforms.size());
     for (cl_uint i = 0; out && i < n && i < g_cl_platforms.size(); ++i) {
         out[i] = reinterpret_cast<cl_platform_id>(&g_cl_platforms[i]);
@@ -380,6 +453,11 @@ cl_int CL_API_CALL fake_clGetDeviceInfo(cl_device_id dev, cl_device_info key, st
         case CL_DEVICE_VENDOR_ID:           return copy_out(d->vendor_id, size, value, size_ret);
         case CL_DEVICE_PCI_BUS_INFO_KHR:    return copy_out(d->pci, size, value, size_ret);
         case CL_DEVICE_UUID_KHR:            return copy_out(d->uuid, size, value, size_ret);
+        case kNvBusId:                      return copy_out(d->nv_bus, size, value, size_ret);
+        case kNvSlotId:                     return copy_out(d->nv_slot, size, value, size_ret);
+        case kNvDomainId:
+            return d->nv_domain ? copy_out(*d->nv_domain, size, value, size_ret) : CL_INVALID_VALUE;
+        case kAmdTopology:                  return copy_out(d->amd, size, value, size_ret);
         case CL_DEVICE_EXTENSIONS:
             if (size_ret) *size_ret = d->extensions.size() + 1;
             if (value && size >= d->extensions.size() + 1) {
@@ -425,6 +503,7 @@ Device read_cl(std::size_t platform, std::size_t device) {
 class OpenClLookup : public ::testing::Test {
 protected:
     void SetUp() override {
+        g_cl_platform_result = CL_SUCCESS;
         g_cl_platforms = {
             {"OpenCLOn12", {cl_device(CL_DEVICE_TYPE_GPU, CL_FALSE, 0x10de, "cl_khr_pci_bus_info",
                                       PciAddress{0, 1, 0, 0}, 0)}},
@@ -474,6 +553,81 @@ TEST_F(OpenClLookup, FindsEveryDeviceByProbeId) {
     EXPECT_EQ(gpgpu::vendor::find_opencl_device(cl_fns(), read_cl(2, 1)), cl_handle(2, 1));
 }
 
+FakeClDevice nv_device(std::string extensions, std::optional<cl_uint> domain) {
+    FakeClDevice d = cl_device(CL_DEVICE_TYPE_GPU, CL_FALSE, 0x10de, std::move(extensions), PciAddress{}, 0);
+    d.nv_bus = 0x41;
+    d.nv_slot = 0x0B;
+    d.nv_domain = domain;
+    return d;
+}
+
+FakeClDevice amd_device(cl_uint topology_type) {
+    FakeClDevice d = cl_device(CL_DEVICE_TYPE_GPU, CL_FALSE, 0x1002, "cl_amd_device_attribute_query",
+                               PciAddress{}, 0);
+    d.amd.type = topology_type;
+    d.amd.bus = static_cast<char>(0xc3);
+    d.amd.device = 0;
+    d.amd.function = 1;
+    return d;
+}
+
+TEST_F(OpenClLookup, NvidiaSlotSplitsIntoDeviceAndFunction) {
+    g_cl_platforms = {{"NVIDIA CUDA", {nv_device("cl_nv_device_attribute_query", 2)}}};
+    const Device d = read_cl(0, 0);
+    ASSERT_TRUE(d.pci_address().has_value());
+    EXPECT_EQ(*d.pci_address(), (PciAddress{2, 0x41, 1, 3}));
+    EXPECT_EQ(d.id(), "pci-0002:41:01.3");
+}
+
+TEST_F(OpenClLookup, NvidiaWithoutDomainQueryAssumesDomainZero) {
+    g_cl_platforms = {{"NVIDIA CUDA", {nv_device("cl_nv_device_attribute_query", std::nullopt)}}};
+    EXPECT_EQ(read_cl(0, 0).id(), "pci-0000:41:01.3");
+}
+
+TEST_F(OpenClLookup, NvidiaQueryNeedsTheExtension) {
+    g_cl_platforms = {{"NVIDIA CUDA", {nv_device("cl_khr_fp64", 0)}}};
+    EXPECT_FALSE(read_cl(0, 0).pci_address().has_value());
+}
+
+TEST_F(OpenClLookup, AmdPcieTopologyGivesAddressInDomainZero) {
+    g_cl_platforms = {{"AMD Accelerated Parallel Processing", {amd_device(1)}}};
+    const Device d = read_cl(0, 0);
+    EXPECT_EQ(d.id(), "pci-0000:c3:00.1");
+    EXPECT_EQ(d.pci_vendor_id(), std::optional<std::uint16_t>(0x1002));
+}
+
+TEST_F(OpenClLookup, AmdNonPcieTopologyGivesNoAddress) {
+    g_cl_platforms = {{"AMD Accelerated Parallel Processing", {amd_device(2)}}};
+    const Device d = read_cl(0, 0);
+    EXPECT_FALSE(d.pci_address().has_value());
+    EXPECT_EQ(d.id().rfind("ocl-1002-", 0), 0u) << d.id();
+}
+
+TEST_F(OpenClLookup, AmdTopologyNeedsTheExtension) {
+    g_cl_platforms = {{"AMD Accelerated Parallel Processing", {amd_device(1)}}};
+    g_cl_platforms[0].devices[0].extensions = "";
+    EXPECT_FALSE(read_cl(0, 0).pci_address().has_value());
+}
+
+TEST_F(OpenClLookup, SameGpuOnTwoPlatformsResolvesTheFirst) {
+    g_cl_platforms.push_back(g_cl_platforms[1]);
+    g_cl_platforms.back().name = "rusticl";
+    ASSERT_EQ(read_cl(3, 0).id(), read_cl(1, 0).id());
+    EXPECT_EQ(gpgpu::vendor::find_opencl_device(cl_fns(), read_cl(3, 0)), cl_handle(1, 0));
+}
+
+TEST_F(OpenClLookup, PlatformEnumerationFailureFindsNothing) {
+    const Device target = read_cl(1, 0);
+    g_cl_platform_result = CL_PLATFORM_NOT_FOUND_KHR;
+    EXPECT_EQ(gpgpu::vendor::find_opencl_device(cl_fns(), target), nullptr);
+}
+
+TEST_F(OpenClLookup, NoPlatformsFindsNothing) {
+    const Device target = read_cl(1, 0);
+    g_cl_platforms.clear();
+    EXPECT_EQ(gpgpu::vendor::find_opencl_device(cl_fns(), target), nullptr);
+}
+
 TEST_F(OpenClLookup, UnknownDeviceIsNotFound) {
     Device other;
     other.set_id("pci-0000:05:00.0");
@@ -485,6 +639,7 @@ TEST_F(OpenClLookup, UnknownDeviceIsNotFound) {
 struct FakeCuDevice {
     int domain, bus, slot, integrated;
     bool has_uuid;
+    bool has_pci = true;
 };
 
 std::vector<FakeCuDevice> g_cu_devices;
@@ -504,9 +659,9 @@ gpgpu::backends::CUresult GPGPU_STDCALL fake_cuDeviceGetAttribute(int* v, int at
     const FakeCuDevice& dev = g_cu_devices[static_cast<std::size_t>(d - 100)];
     switch (attribute) {
         case 18: *v = dev.integrated; return 0;
-        case 33: *v = dev.bus; return 0;
-        case 34: *v = dev.slot; return 0;
-        case 50: *v = dev.domain; return 0;
+        case 33: *v = dev.bus; return dev.has_pci ? 0 : 1;
+        case 34: *v = dev.slot; return dev.has_pci ? 0 : 1;
+        case 50: *v = dev.domain; return dev.has_pci ? 0 : 1;
         default: return 1;
     }
 }
@@ -529,6 +684,21 @@ TEST(CudaLookup, IdentityUsesPciAttributes) {
     EXPECT_EQ(d.type(), DeviceType::Discrete);
     EXPECT_EQ(d.pci_vendor_id(), std::optional<std::uint16_t>(0x10de));
     EXPECT_TRUE(d.uuid().has_value());
+}
+
+TEST(CudaLookup, WithoutPciAttributesUsesUuidThenOrdinal) {
+    g_cu_devices = {{0, 0, 0, 1, true, false}, {0, 0, 0, 0, false, false}};
+    Device with_uuid;
+    gpgpu::backends::read_cuda_identity(kCudaFns, 100, 0, with_uuid);
+    EXPECT_FALSE(with_uuid.pci_address().has_value());
+    EXPECT_FALSE(with_uuid.pci_vendor_id().has_value());
+    EXPECT_EQ(with_uuid.id(), "uuid-a0a1a2a3-a4a5-a6a7-a8a9-aaabacadaeaf");
+    EXPECT_EQ(with_uuid.type(), DeviceType::Integrated);
+
+    Device bare;
+    gpgpu::backends::read_cuda_identity(kCudaFns, 101, 1, bare);
+    EXPECT_EQ(bare.id(), "cuda-1");
+    EXPECT_EQ(gpgpu::backends::find_cuda_ordinal(kCudaFns, bare), std::optional<int>(1));
 }
 
 TEST(CudaLookup, FindsOrdinalOfProbeId) {
@@ -570,6 +740,17 @@ TEST(HipLookup, IdentityParsesBusIdString) {
     Device no_pci;
     gpgpu::backends::read_hip_identity(kHipFns, 1, 1, no_pci);
     EXPECT_EQ(no_pci.id(), "hip-1");
+}
+
+TEST(HipLookup, MalformedBusIdGivesNoAddress) {
+    g_hip_bus_ids = {"0000:03:00", "not-a-bus-id"};
+    for (int i = 0; i < 2; ++i) {
+        Device d;
+        gpgpu::backends::read_hip_identity(kHipFns, i, i, d);
+        EXPECT_FALSE(d.pci_address().has_value());
+        EXPECT_FALSE(d.pci_vendor_id().has_value());
+        EXPECT_EQ(d.id(), "hip-" + std::to_string(i));
+    }
 }
 
 TEST(HipLookup, FindsOrdinalOfProbeId) {

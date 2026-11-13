@@ -270,11 +270,6 @@ ProbeResult probe_opencl() {
             info_scalar(clGetDeviceInfo, dev, CL_DEVICE_NATIVE_VECTOR_WIDTH_DOUBLE, native_double);
             if (native_double > 0) d.set_fp64(true);
 
-            cl_bool unified = 0;
-            if (info_scalar(clGetDeviceInfo, dev, CL_DEVICE_HOST_UNIFIED_MEMORY, unified)) {
-                d.set_integrated(unified != 0);
-            }
-
             std::string exts = info_string(clGetDeviceInfo, dev, CL_DEVICE_EXTENSIONS);
             if (exts.find("cl_khr_fp16") != std::string::npos) d.set_fp16(true);
             if (exts.find("cl_khr_fp64") != std::string::npos) d.set_fp64(true);

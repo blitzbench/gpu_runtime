@@ -23,8 +23,11 @@ ProbeResult probe_opencl();
 ProbeResult probe_vulkan();
 ProbeResult probe_metal();
 
-// Builds the Report from every backend's probe result: setups in probe order, each classified by
-// the backends that exposed the same Device::id().
+// Builds the Report from every backend's probe result, keeping setups in probe order:
+//   - each setup is classified by the backends that exposed the same Device::id(); when one backend
+//     exposes that id more than once, only its first setup can be Native or Fallback;
+//   - identity fields a backend could not report (PCI vendor and device id, UUID, a type of
+//     Unknown) are filled from the first other device with the same id that reports them.
 Report assemble_report(std::vector<ProbeResult> probes);
 
 // Convenience helper for assembling a Backend value when the library never

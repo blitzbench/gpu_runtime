@@ -71,11 +71,15 @@ public:
     [[nodiscard]] const std::string& vendor_string() const noexcept { return vendor_string_; }
 
     // --- PCI and kind ---
-    // Absent when the device is not on PCI or the backend cannot report it.
+    // Absent when the device is not on PCI or no backend can report it. In a Report, a field one
+    // backend cannot report is filled from another backend's Device with the same id(), so every
+    // Setup of one physical device carries the same PCI ids; the UUID, being backend-specific, is
+    // only filled where the backend reports none.
     [[nodiscard]] const std::optional<PciAddress>& pci_address() const noexcept { return pci_address_; }
     [[nodiscard]] std::optional<std::uint16_t> pci_vendor_id() const noexcept { return pci_vendor_id_; }
     [[nodiscard]] std::optional<std::uint16_t> pci_device_id() const noexcept { return pci_device_id_; }
     [[nodiscard]] const std::optional<DeviceUuid>& uuid() const noexcept { return uuid_; }
+    // The single source of truth for integrated vs. discrete.
     [[nodiscard]] DeviceType type() const noexcept { return type_; }
 
     // --- memory ---
@@ -94,8 +98,7 @@ public:
     // --- clocks ---
     [[nodiscard]] std::optional<std::uint32_t> frequency() const noexcept { return frequency_; }
 
-    // --- topology / form ---
-    [[nodiscard]] std::optional<bool> integrated() const noexcept { return integrated_; }
+    // --- PCIe link ---
     [[nodiscard]] std::optional<std::uint32_t> pcie_gen() const noexcept { return pcie_gen_; }
     [[nodiscard]] std::optional<std::uint32_t> pcie_width() const noexcept { return pcie_width_; }
 
@@ -130,7 +133,6 @@ public:
     Device& set_max_workgroup_size(std::uint32_t v) { max_workgroup_size_ = v; return *this; }
     Device& set_shared_memory_per_block(std::uint32_t v) { shared_memory_per_block_ = v; return *this; }
     Device& set_frequency(std::uint32_t v) { frequency_ = v; return *this; }
-    Device& set_integrated(bool v) { integrated_ = v; return *this; }
     Device& set_pcie_gen(std::uint32_t v) { pcie_gen_ = v; return *this; }
     Device& set_pcie_width(std::uint32_t v) { pcie_width_ = v; return *this; }
     Device& set_driver_version(std::string v) { driver_version_ = std::move(v); return *this; }
@@ -164,7 +166,6 @@ private:
 
     std::optional<std::uint32_t> frequency_;
 
-    std::optional<bool> integrated_;
     std::optional<std::uint32_t> pcie_gen_;
     std::optional<std::uint32_t> pcie_width_;
 
