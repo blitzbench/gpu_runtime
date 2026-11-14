@@ -15,6 +15,7 @@ include(GoogleTest)
 
 # The tests reach the library's internal headers (src/), so they link the static library.
 add_executable(gpu_runtime_tests
+        capability_test.cpp
         identity_test.cpp
         lookup_test.cpp
         report_test.cpp

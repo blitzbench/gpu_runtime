@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(gpu_runtime LANGUAGES CXX VERSION 0.2.0)
+project(gpu_runtime LANGUAGES CXX VERSION 0.2.1)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(GPGPU_TOP_LEVEL ON)

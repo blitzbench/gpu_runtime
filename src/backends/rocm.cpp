@@ -1,18 +1,23 @@
 // ROCm/HIP probe. We dlopen libamdhip64.so (amdhip64.dll on Windows) and
 // resolve a deliberately small set of stable entry points. The hipDeviceProp_t
-// struct layout has shifted between ROCm releases, so we avoid it entirely.
+// struct layout has shifted between ROCm releases; the only use of it is the
+// architecture name, read through the layout-versioned hipGetDevicePropertiesR0600.
 
 #include "probe.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_capabilities.hpp"
 #include "device_identity.hpp"
 
 namespace gpgpu::backends {
@@ -25,6 +30,13 @@ using PFN_hipDeviceGetName     = hipError_t (GPGPU_STDCALL*)(char*, int, hipDevi
 using PFN_hipDeviceTotalMem    = hipError_t (GPGPU_STDCALL*)(std::size_t*, hipDevice_t);
 using PFN_hipDriverGetVersion  = hipError_t (GPGPU_STDCALL*)(int*);
 using PFN_hipRuntimeGetVersion = hipError_t (GPGPU_STDCALL*)(int*);
+using PFN_hipGetDevicePropertiesR0600 = hipError_t (GPGPU_STDCALL*)(void*, int);
+
+// hipDeviceProp_tR0600, frozen since ROCm 6.0: 1472 bytes, with char gcnArchName[256] at offset
+// 1160. A runtime predating ROCm 6.0 does not export the R0600 entry point.
+constexpr std::size_t kDevicePropR0600Size = 1472;
+constexpr std::size_t kGcnArchNameOffset = 1160;
+constexpr std::size_t kGcnArchNameSize = 256;
 
 bool ok(hipError_t r) { return r == hipSuccess; }
 
@@ -49,7 +61,32 @@ hipDevice_t device_for_ordinal(const HipIdentityFns& fns, int ordinal) {
     return device;
 }
 
+std::string gcn_arch_name(PFN_hipGetDevicePropertiesR0600 get_properties, int ordinal) {
+    if (!get_properties) return {};
+    std::vector<unsigned char> props(kDevicePropR0600Size, 0);
+    if (!ok(get_properties(props.data(), ordinal))) return {};
+    const char* name = reinterpret_cast<const char*>(props.data() + kGcnArchNameOffset);
+    return std::string(name, ::strnlen(name, kGcnArchNameSize));
+}
+
+bool starts_with(std::string_view s, std::string_view prefix) {
+    return s.substr(0, prefix.size()) == prefix;
+}
+
 } // namespace
+
+void set_rocm_capabilities(std::string_view gcn_arch_name, Device& out) {
+    // Every architecture ROCm supports executes fp64, fp16 and 8-bit integer arithmetic. Matrix
+    // cores are the MFMA units of CDNA (gfx908, gfx90a, gfx94x, gfx950) and the WMMA instructions
+    // of RDNA3 and RDNA4 (gfx11xx, gfx12xx).
+    out.set_fp16(true);
+    out.set_fp64(true);
+    out.set_int8(true);
+    const std::string_view arch = gcn_arch_name.substr(0, gcn_arch_name.find(':'));
+    out.set_tensor_cores(arch == "gfx908" || arch == "gfx90a" || starts_with(arch, "gfx94") ||
+                         starts_with(arch, "gfx95") || starts_with(arch, "gfx11") ||
+                         starts_with(arch, "gfx12"));
+}
 
 void read_hip_identity(const HipIdentityFns& fns, hipDevice_t device, int ordinal, Device& out) {
     if (fns.hipDeviceGetPCIBusId) {
@@ -104,6 +141,7 @@ ProbeResult probe_rocm() {
     auto hipRuntimeGetVersion = platform::resolve_as<PFN_hipRuntimeGetVersion>(lib, "hipRuntimeGetVersion");
     auto hipDeviceGetPCIBusId = platform::resolve_as<PFN_hipDeviceGetPCIBusId>(lib, "hipDeviceGetPCIBusId");
     auto hipDeviceGetUuid     = platform::resolve_as<PFN_hipDeviceGetUuid>(lib, "hipDeviceGetUuid");
+    auto hipGetDeviceProps    = platform::resolve_as<PFN_hipGetDevicePropertiesR0600>(lib, "hipGetDevicePropertiesR0600");
 
     if (!hipGetDeviceCount) {
         out.backend = Backend(BackendId::ROCm, /*version*/ {}, lib_path,
@@ -153,13 +191,7 @@ ProbeResult probe_rocm() {
 
         read_hip_identity(identity_fns, dev, i, d);
 
-        // ROCm GPUs all expose FP64; FP16 and INT8 are supported on every GCN
-        // generation from Vega onward. We cannot easily distinguish older
-        // hardware without a properties struct, so flag them as supported.
-        d.set_fp16(true);
-        d.set_fp64(true);
-        d.set_int8(true);
-        d.set_tensor_cores(false); // matrix cores exist on CDNA but identification is fragile.
+        set_rocm_capabilities(gcn_arch_name(hipGetDeviceProps, i), d);
 
         out.devices.push_back(std::move(d));
     }

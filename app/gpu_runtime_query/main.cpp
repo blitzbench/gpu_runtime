@@ -96,18 +96,16 @@ int main() {
         std::printf("      clock=%s MHz  driver=%s\n",
                     fmt_opt(dev.frequency()).c_str(),
                     fmt_opt_str(dev.driver_version()).c_str());
-        std::printf("      fp16=%s fp64=%s int8=%s tensor_cores=%s\n",
-                    yn(dev.supports_fp16()).c_str(),
-                    yn(dev.supports_fp64()).c_str(),
-                    yn(dev.supports_int8()).c_str(),
-                    yn(dev.supports_tensor_cores()).c_str());
-
         std::printf("      Setups:\n");
         for (const auto& s : report.setups_for(dev.id())) {
-            std::printf("        %-8s %-10s preferred=%s\n",
+            std::printf("        %-8s %-10s preferred=%-8s fp16=%s fp64=%s int8=%s tensor_cores=%s\n",
                         std::string(s.backend.name()).c_str(),
                         s.backend.version().empty() ? "-" : s.backend.version().c_str(),
-                        std::string(gpgpu::to_string(s.preferred)).c_str());
+                        std::string(gpgpu::to_string(s.preferred)).c_str(),
+                        yn(s.device.supports_fp16()).c_str(),
+                        yn(s.device.supports_fp64()).c_str(),
+                        yn(s.device.supports_int8()).c_str(),
+                        yn(s.device.supports_tensor_cores()).c_str());
         }
     }
 

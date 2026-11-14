@@ -100,9 +100,13 @@ ProbeResult probe_metal() {
 
         d.set_driver_version(version_buf);
 
+        // Metal Shading Language has no double type. simdgroup_matrix needs the Apple7 family.
         d.set_fp16(true);
-        d.set_fp64(false); // Apple GPUs don't expose hardware FP64.
+        d.set_fp64(false);
         d.set_int8(true);
+        if (@available(macOS 11.0, *)) {
+            d.set_tensor_cores([dev supportsFamily:MTLGPUFamilyApple7]);
+        }
 
         out.devices.push_back(std::move(d));
     }

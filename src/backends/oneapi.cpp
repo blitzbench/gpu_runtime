@@ -16,6 +16,7 @@
 #include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_capabilities.hpp"
 #include "device_identity.hpp"
 
 namespace gpgpu::backends {
@@ -84,6 +85,18 @@ void read_level_zero_identity(ze_pfnDevicePciGetPropertiesExt_t pci_properties,
     identity::assign_id(out, backend_id);
 }
 
+void read_level_zero_capabilities(ze_pfnDeviceGetModuleProperties_t get_module_properties,
+                                  ze_device_handle_t device, Device& out) {
+    // 8-bit integer types are core in OpenCL C and SPIR-V kernels on every Level Zero device.
+    out.set_int8(true);
+    if (!get_module_properties) return;
+    ze_device_module_properties_t props{};
+    props.stype = ZE_STRUCTURE_TYPE_DEVICE_MODULE_PROPERTIES;
+    if (!ok(get_module_properties(device, &props))) return;
+    out.set_fp16((props.flags & ZE_DEVICE_MODULE_FLAG_FP16) != 0);
+    out.set_fp64((props.flags & ZE_DEVICE_MODULE_FLAG_FP64) != 0);
+}
+
 ProbeResult probe_oneapi() {
     ProbeResult out;
 
@@ -103,6 +116,7 @@ ProbeResult probe_oneapi() {
     auto zeDeviceGetCompute    = platform::resolve_as<PFN_zeDeviceGetComputeProperties>(lib, "zeDeviceGetComputeProperties");
     auto zeDeviceGetMemory     = platform::resolve_as<PFN_zeDeviceGetMemoryProperties>(lib, "zeDeviceGetMemoryProperties");
     auto zeDevicePciGetProps   = platform::resolve_as<ze_pfnDevicePciGetPropertiesExt_t>(lib, "zeDevicePciGetPropertiesExt");
+    auto zeDeviceGetModule     = platform::resolve_as<ze_pfnDeviceGetModuleProperties_t>(lib, "zeDeviceGetModuleProperties");
 
     if (!zeInit || !zeDriverGet || !zeDeviceGet || !zeDeviceGetProperties) {
         out.backend = Backend(BackendId::OneAPI, /*version*/ {}, lib_path,
@@ -208,9 +222,7 @@ ProbeResult probe_oneapi() {
 
             if (!best_api_version.empty()) d.set_driver_version(best_api_version);
 
-            d.set_fp16(true);
-            d.set_int8(true);
-
+            read_level_zero_capabilities(zeDeviceGetModule, h, d);
             read_level_zero_identity(zeDevicePciGetProps, h, props, device_ordinal, d);
 
             out.devices.push_back(std::move(d));

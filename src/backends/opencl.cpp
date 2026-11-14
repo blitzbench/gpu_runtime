@@ -273,7 +273,8 @@ ProbeResult probe_opencl() {
             std::string exts = info_string(clGetDeviceInfo, dev, CL_DEVICE_EXTENSIONS);
             if (exts.find("cl_khr_fp16") != std::string::npos) d.set_fp16(true);
             if (exts.find("cl_khr_fp64") != std::string::npos) d.set_fp64(true);
-            if (exts.find("cl_khr_integer_dot_product") != std::string::npos) d.set_int8(true);
+            // char is a core OpenCL C type; 8-bit integer arithmetic needs no extension.
+            d.set_int8(true);
 
             d.set_driver_version(info_string(clGetDeviceInfo, dev, CL_DRIVER_VERSION));
 

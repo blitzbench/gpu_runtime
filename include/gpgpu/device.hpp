@@ -105,7 +105,21 @@ public:
     // --- driver ---
     [[nodiscard]] const std::optional<std::string>& driver_version() const noexcept { return driver_version_; }
 
-    // --- feature flags ---
+    // --- capability flags ---
+    // A flag means the backend that produced this Device can execute kernels using the capability
+    // on it. Each backend reads its own API, so the Setups of one physical device can disagree
+    // (a driver may expose fp64 through OpenCL but not through Vulkan); check the flag of the
+    // Setup that will run the kernel. Sources per backend:
+    //   fp64          CUDA: always; ROCm: always; Level Zero: ZE_DEVICE_MODULE_FLAG_FP64;
+    //                 OpenCL: cl_khr_fp64; Vulkan: shaderFloat64; Metal: never.
+    //   fp16          CUDA: compute capability >= 5.3; ROCm: always; Level Zero:
+    //                 ZE_DEVICE_MODULE_FLAG_FP16; OpenCL: cl_khr_fp16; Vulkan: shaderFloat16;
+    //                 Metal: always.
+    //   int8          8-bit integer arithmetic in kernels, not a dot-product instruction.
+    //                 Vulkan: shaderInt8; CUDA, ROCm, Level Zero, OpenCL and Metal: always.
+    //   tensor_cores  CUDA: compute capability >= 7.0; ROCm: gfx908, gfx90a, gfx94x, gfx950,
+    //                 gfx11xx, gfx12xx; Vulkan: VK_KHR_cooperative_matrix; Metal: the Apple7
+    //                 GPU family; Level Zero and OpenCL: never.
     [[nodiscard]] bool supports_fp16() const noexcept { return fp16_; }
     [[nodiscard]] bool supports_fp64() const noexcept { return fp64_; }
     [[nodiscard]] bool supports_int8() const noexcept { return int8_; }

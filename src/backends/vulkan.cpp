@@ -16,6 +16,7 @@
 #include "../identity.hpp"
 #include "../platform/lib_loader.hpp"
 #include "../search_paths.hpp"
+#include "device_capabilities.hpp"
 #include "device_identity.hpp"
 
 namespace gpgpu::backends {
@@ -32,16 +33,13 @@ DeviceType device_type(VkPhysicalDeviceType type) {
     }
 }
 
-bool supports_extension(const VulkanIdentityFns& fns, VkPhysicalDevice device, const char* name) {
-    if (!fns.vkEnumerateDeviceExtensionProperties) return false;
+bool supports_extension(PFN_vkEnumerateDeviceExtensionProperties enumerate, VkPhysicalDevice device,
+                        const char* name) {
+    if (!enumerate) return false;
     std::uint32_t count = 0;
-    if (fns.vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS) {
-        return false;
-    }
+    if (enumerate(device, nullptr, &count, nullptr) != VK_SUCCESS) return false;
     std::vector<VkExtensionProperties> extensions(count);
-    if (fns.vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extensions.data()) != VK_SUCCESS) {
-        return false;
-    }
+    if (enumerate(device, nullptr, &count, extensions.data()) != VK_SUCCESS) return false;
     for (const auto& e : extensions) {
         if (std::strncmp(e.extensionName, name, VK_MAX_EXTENSION_NAME_SIZE) == 0) return true;
     }
@@ -75,7 +73,8 @@ void read_vulkan_identity(const VulkanIdentityFns& fns, VkPhysicalDevice device,
         pci.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT;
         VkPhysicalDeviceIDProperties ids{};
         ids.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
-        const bool has_pci = supports_extension(fns, device, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME);
+        const bool has_pci = supports_extension(fns.vkEnumerateDeviceExtensionProperties, device,
+                                               VK_EXT_PCI_BUS_INFO_EXTENSION_NAME);
         if (has_pci) ids.pNext = &pci;
         VkPhysicalDeviceProperties2 props2{};
         props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -92,6 +91,44 @@ void read_vulkan_identity(const VulkanIdentityFns& fns, VkPhysicalDevice device,
     std::snprintf(backend_id, sizeof(backend_id), "vk-%04x:%04x-%s", props.vendorID, props.deviceID,
                   identity::format_uuid(props.pipelineCacheUUID).c_str());
     identity::assign_id(out, backend_id);
+}
+
+void read_vulkan_capabilities(const VulkanCapabilityFns& fns, VkPhysicalDevice device,
+                              std::uint32_t device_api_version, Device& out) {
+    VkPhysicalDeviceFeatures features{};
+    fns.vkGetPhysicalDeviceFeatures(device, &features);
+    out.set_fp64(features.shaderFloat64 == VK_TRUE);
+
+    if (!fns.vkGetPhysicalDeviceFeatures2 || device_api_version < VK_API_VERSION_1_1) return;
+
+    // A feature structure may only be chained when the device knows it: shaderFloat16 and
+    // shaderInt8 are core in 1.2 and otherwise need VK_KHR_shader_float16_int8.
+    const bool has_float16_int8 =
+        device_api_version >= VK_API_VERSION_1_2 ||
+        supports_extension(fns.vkEnumerateDeviceExtensionProperties, device,
+                           VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+    const bool has_cooperative_matrix = supports_extension(
+        fns.vkEnumerateDeviceExtensionProperties, device, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+
+    VkPhysicalDeviceShaderFloat16Int8Features float16_int8{};
+    float16_int8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix{};
+    cooperative_matrix.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+    void** tail = &features2.pNext;
+    if (has_float16_int8) {
+        *tail = &float16_int8;
+        tail = &float16_int8.pNext;
+    }
+    if (has_cooperative_matrix) *tail = &cooperative_matrix;
+    if (!features2.pNext) return;
+    fns.vkGetPhysicalDeviceFeatures2(device, &features2);
+
+    out.set_fp16(float16_int8.shaderFloat16 == VK_TRUE);
+    out.set_int8(float16_int8.shaderInt8 == VK_TRUE);
+    out.set_tensor_cores(cooperative_matrix.cooperativeMatrix == VK_TRUE);
 }
 
 ProbeResult probe_vulkan() {
@@ -168,6 +205,15 @@ ProbeResult probe_vulkan() {
         resolve_instance("vkGetPhysicalDeviceProperties"));
     auto vkGetPhysicalDeviceMemoryProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
         resolve_instance("vkGetPhysicalDeviceMemoryProperties"));
+    const VulkanCapabilityFns capability_fns{
+        reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(resolve_instance("vkGetPhysicalDeviceFeatures")),
+        instance_api >= VK_API_VERSION_1_1
+            ? reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+                  resolve_instance("vkGetPhysicalDeviceFeatures2"))
+            : nullptr,
+        reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+            resolve_instance("vkEnumerateDeviceExtensionProperties")),
+    };
     const VulkanIdentityFns identity_fns{
         vkGetPhysicalDeviceProperties,
         instance_api >= VK_API_VERSION_1_1
@@ -178,7 +224,8 @@ ProbeResult probe_vulkan() {
             resolve_instance("vkEnumerateDeviceExtensionProperties")),
     };
 
-    if (!vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceProperties) {
+    if (!vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceProperties ||
+        !capability_fns.vkGetPhysicalDeviceFeatures) {
         if (vkDestroyInstance) vkDestroyInstance(instance, nullptr);
         out.backend = Backend(BackendId::Vulkan, instance_version_str, lib_path,
                               BackendStatus::InitFailed,
@@ -221,6 +268,7 @@ ProbeResult probe_vulkan() {
             if (device_local > 0) d.set_memory(device_local);
         }
 
+        read_vulkan_capabilities(capability_fns, pd, props.apiVersion, d);
         read_vulkan_identity(identity_fns, pd, d);
 
         out.devices.push_back(std::move(d));

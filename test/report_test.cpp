@@ -84,6 +84,22 @@ TEST(AssembleReport, SameGpuAcrossBackendsCollapsesToOnePreferredSetup) {
     EXPECT_EQ(preferred[2].preferred, Preference::Fallback);
 }
 
+TEST(AssembleReport, CapabilityFlagsStayWithTheirSetup) {
+    Device cuda = rtx();
+    cuda.set_fp16(true).set_fp64(true);
+    Device opencl = rtx();
+    opencl.set_fp64(true);
+    std::vector<ProbeResult> probes;
+    probes.push_back(probe(BackendId::CUDA, {cuda}));
+    probes.push_back(probe(BackendId::OpenCL, {opencl}));
+    const auto report = gpgpu::backends::assemble_report(std::move(probes));
+
+    ASSERT_EQ(report.size(), 2u);
+    EXPECT_TRUE(report.by_backend(BackendId::CUDA)[0].device.supports_fp16());
+    EXPECT_FALSE(report.by_backend(BackendId::OpenCL)[0].device.supports_fp16());
+    EXPECT_TRUE(report.by_backend(BackendId::OpenCL)[0].device.supports_fp64());
+}
+
 TEST(AssembleReport, NonPreferredSetupsOfTheSameGpuAreOther) {
     const auto report = laptop();
     for (const gpgpu::Setup& s : report.setups_for("pci-0000:01:00.0")) {

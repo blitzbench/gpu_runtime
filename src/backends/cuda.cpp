@@ -19,6 +19,7 @@
 #include "../search_paths.hpp"
 #include "../identity.hpp"
 #include "calling_convention.hpp"
+#include "device_capabilities.hpp"
 #include "device_identity.hpp"
 
 namespace gpgpu::backends {
@@ -129,6 +130,16 @@ std::optional<int> find_cuda_ordinal(const CudaIdentityFns& fns, const Device& t
     return std::nullopt;
 }
 
+void set_cuda_capabilities(int cc_major, int cc_minor, Device& out) {
+    const int cc = cc_major * 10 + cc_minor;
+    // Half-precision arithmetic (__hfma2) needs sm_53. Every architecture the driver still reports
+    // executes double precision, at a reduced rate on consumer parts, and 8-bit integer arithmetic.
+    out.set_fp16(cc >= 53);
+    out.set_fp64(cc_major >= 1);
+    out.set_int8(cc_major >= 1);
+    out.set_tensor_cores(cc_major >= 7);
+}
+
 ProbeResult probe_cuda() {
     ProbeResult out;
 
@@ -231,11 +242,7 @@ ProbeResult probe_cuda() {
             if (gbps > 0) d.set_memory_bandwidth_gbps(gbps);
         }
 
-        // Feature flags from compute capability.
-        if (cc_major >= 6) d.set_fp16(true);   // sm_60+ has native FP16
-        if (cc_major >= 1) d.set_fp64(true);   // CUDA always exposes FP64 (slow on consumer)
-        if ((cc_major == 6 && cc_minor == 1) || cc_major >= 7) d.set_int8(true);
-        if (cc_major >= 7) d.set_tensor_cores(true);
+        set_cuda_capabilities(cc_major, cc_minor, d);
 
         if (!version_str.empty()) d.set_driver_version(version_str);
 
